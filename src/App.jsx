@@ -7,7 +7,7 @@ import { store, blobPut as idbPut, blobGet as idbGet, blobDel as idbDel } from "
 
 // ———————————————— Seed / snapshot ————————————————
 // Everything the app knows lives under these localStorage keys.
-const STATE_KEYS_STATIC = ["fishtank-config-v4", "fishtank-lastweek-v4", "agentclubs-v3", "tabs-v1", "allamerican-v1", "allamerican-lastweek-v1", "ownerclubs-v1", "archive-index-v1", "book-weeks-v1", "book-checklist-v1"];
+const STATE_KEYS_STATIC = ["fishtank-config-v4", "fishtank-lastweek-v4", "agentclubs-v3", "tabs-v1", "allamerican-v1", "allamerican-lastweek-v1", "ownerclubs-v1", "archive-index-v1", "book-weeks-v1", "book-checklist-v1", "fishtank-club-v1", "fishtank-club-week-v1", "ui-v1"];
 // Owner clubs added later live under oc-cfg-* / oc-week-* keys — pick those up too.
 const allStateKeys = () => {
   const all = [...STATE_KEYS_STATIC];
@@ -897,6 +897,24 @@ function Btn({ children, onClick, tone = "dark", small, disabled }) {
     </button>
   );
 }
+// Collapsible "How this works" block — definitions live at the bottom of each screen.
+function Notes({ children, title = "How this works" }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ marginTop: 22, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
+      <button onClick={() => setOpen(!open)} style={{ border: "none", background: "none", color: C.mute, cursor: "pointer", fontSize: 12.5, fontWeight: 700, padding: 0 }}>{open ? "▾" : "▸"} {title}</button>
+      {open && <div style={{ color: C.mute, fontSize: 12.5, lineHeight: 1.55, marginTop: 8, display: "grid", gap: 8 }}>{children}</div>}
+    </div>
+  );
+}
+// Tables inside .fit shrink their text/padding with the window so every column fits without sideways scroll.
+const FIT_CSS = `.app table{width:100%;table-layout:auto}
+.app th{white-space:normal!important;padding:6px 5px!important;font-size:clamp(8.5px,0.62vw,10.5px)!important;letter-spacing:.04em!important}
+.app td{padding:5px 5px!important;font-size:clamp(10px,0.78vw,13.5px)!important}
+.app td select{max-width:100%;font-size:clamp(10px,0.74vw,12px)!important;padding:3px 4px!important}
+.app td input{font-size:clamp(10px,0.74vw,12.5px)!important;padding:3px 4px!important;max-width:clamp(44px,5.5vw,90px)}
+.fit{overflow:hidden!important}`;
+
 const Card = ({ title, children, right }) => (
   <div style={{ background: C.card, borderRadius: 10, padding: "16px 20px", boxShadow: "0 1px 5px rgba(0,0,0,0.15)" }}>
     <div style={{ display: "flex", alignItems: "center", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
@@ -908,22 +926,17 @@ const Card = ({ title, children, right }) => (
 );
 
 // ———————————————— Main ————————————————
+const UI_KEY = "ui-v1";
 export default function App() {
-  const [cfg, setCfg] = useState(DEFAULT_CONFIG);
-  const [players, setPlayers] = useState(null);
-  const [period, setPeriod] = useState("");
-  const [weekAdj, setWeekAdj] = useState({});
-  const [tab, setTab] = useState("settle");
+  const [ui, setUi] = useState({ theme: "dark", mode: "" });
   const [err, setErr] = useState("");
-  const [saveNote, setSaveNote] = useState("");
-  const [expanded, setExpanded] = useState({});
   const [loaded, setLoaded] = useState(false);
   const [clubs, setClubs] = useState([]);
-  const fileRef = useRef(null);
   const seedRef = useRef(null);
   const saveClubs = async (next) => { setClubs(next); await saveOwnerClubs(next); };
+  const up = (patch) => { const next = { ...ui, ...patch }; setUi(next); store.set(UI_KEY, JSON.stringify(next)).catch(() => {}); };
   const addClub = async () => {
-    const name = window.prompt("Name of the new owner club (e.g. Bazaar):");
+    const name = window.prompt("Name of the new club:");
     if (!name || !name.trim()) return;
     const c = newOwnerClub(name.trim());
     await saveClubs([...clubs, c]);
@@ -941,151 +954,53 @@ export default function App() {
     catch (e) { setErr("Couldn't import data file: " + (e.message || e)); }
   };
 
-  useEffect(() => {
-    (async () => {
-      await applySeedOnce();
-      try { setClubs(await loadOwnerClubs()); } catch (e) {}
-      try {
-        const c = await store.get("fishtank-config-v4");
-        if (c?.value) {
-          const s = JSON.parse(c.value);
-          if (!s.themeV2) { s.theme = "dark"; s.themeV2 = true; }
-          setCfg({ ...DEFAULT_CONFIG, ...s,
-            ownAccounts: s.ownAccounts || DEFAULT_CONFIG.ownAccounts,
-            fees: s.fees || DEFAULT_CONFIG.fees,
-            backed: s.backed || DEFAULT_CONFIG.backed,
-            umbrellas: s.umbrellas || DEFAULT_CONFIG.umbrellas });
-        }
-      } catch (e) {}
-      try {
-        const d = await store.get("fishtank-lastweek-v4");
-        if (d?.value) { const s = JSON.parse(d.value); setPlayers(s.players); setPeriod(s.period); setWeekAdj(s.weekAdj || {}); }
-      } catch (e) {}
-      setLoaded(true);
-    })();
-  }, []);
+  useEffect(() => { (async () => {
+    await applySeedOnce();
+    let u = null;
+    try { const c = await store.get(UI_KEY); if (c?.value) u = JSON.parse(c.value); } catch (e) {}
+    // Older builds kept theme + current tab inside the Fish Tank config.
+    if (!u) { try { const c = await store.get("fishtank-config-v4"); if (c?.value) { const s = JSON.parse(c.value); u = { theme: s.theme || "dark", mode: s.mode || "" }; } } catch (e) {} }
+    if (u) setUi({ theme: "dark", ...u });
+    try { setClubs(await loadOwnerClubs()); } catch (e) {}
+    setLoaded(true);
+  })(); }, []);
 
-  const persistCfg = useCallback(async (next) => {
-    setCfg(next);
-    try { await store.set("fishtank-config-v4", JSON.stringify(next)); setSaveNote(""); }
-    catch (e) { setSaveNote("Change couldn't be saved — it still applies this session."); }
-  }, []);
-  const up = (patch) => persistCfg({ ...cfg, ...patch });
+  if (!loaded) return <div style={{ fontFamily: "Georgia, serif", padding: 40, color: "#8A7E6C" }}>Loading…</div>;
 
-  const persistWeek = async (p, per, adj) => {
-    try { await store.set("fishtank-lastweek-v4", JSON.stringify({ players: p, period: per, weekAdj: adj })); } catch (e) {}
-  };
-  const setAdj = (adj) => { setWeekAdj(adj); persistWeek(players, period, adj); };
-
-  const onFile = async (file) => {
-    setErr("");
-    try {
-      const buf = await file.arrayBuffer();
-      const { players: p, period: per } = parseWorkbook(buf);
-      if (players && period && period !== per && model) {
-        try { await archiveWeek("fishtank", "Fish Tank", period, async () => { await downloadWorkbook(model, period, cfg); }); } catch (e) {}
-      }
-      const names = { ...cfg.names };
-      p.forEach((x) => { names[x.memberId] = x.name; if (x.saId !== "-") names[x.saId] = x.saName; });
-      await persistCfg({ ...cfg, names });
-      setPlayers(p); setPeriod(per); setWeekAdj({}); setTab("settle");
-      persistWeek(p, per, {});
-      try { await idbPut(rawKey("fishtank", per), { site: "fishtank", siteName: "Fish Tank", period: per, name: file.name, buf }); } catch (e) {}
-    } catch (e) { setErr(e.message || String(e)); }
-  };
-  const archiveNow = async () => {
-    if (!model || !period) return;
-    await archiveWeek("fishtank", "Fish Tank", period, async () => { await downloadWorkbook(model, period, cfg); });
-    setSaveNote(`Archived ${period} — see the Archive tab.`);
-  };
-
-  const model = useMemo(() => (players ? buildModel(players, cfg, weekAdj, period) : null), [players, cfg, weekAdj, period]);
-
-  const needsSetup = useMemo(() => {
-    if (!model) return { deals: [], assigns: [] };
-    const deals = [
-      ...model.looseSAs.filter((e) => !cfg.confirmedSAs[e.id]),
-      ...model.umbEntities.flatMap((u) => u.subgroups.filter((s) => !cfg.confirmedSAs[s.id])),
-      ...model.indEntities.filter((e) => !cfg.confirmedPlayers[e.id]),
-    ];
-    return { deals, assigns: model.unassigned };
-  }, [model, cfg]);
-
-  const finalized = cfg.finalizedPeriods?.[period];
-  // "Lock" = the old one-way Finalize, but reversible: locking snapshots each
-  // backed makeup player's entering balance and rolls it forward (unless it's
-  // tracked on a unified staking deal, which stays frozen either way);
-  // unlocking puts that entering balance back so edits recompute cleanly,
-  // and a re-lock re-snapshots off whatever the (possibly edited) numbers now are.
-  const lockWeek = () => {
-    const backed = { ...cfg.backed };
-    const snapshot = {};
-    model.backedEntities.forEach((e) => {
-      if (e.dealType !== "makeup") return;
-      const k = e.key.slice(2);
-      if (backed[k]?.unifiedDealId) return; // makeup tracked on the shared staking deal instead — leave local balance frozen
-      snapshot[k] = Math.round(e.makeupBefore * 100) / 100;
-      if (backed[k]) backed[k] = { ...backed[k], makeup: Math.round(e.makeupAfter * 100) / 100 };
-    });
-    up({ backed, finalizedPeriods: { ...cfg.finalizedPeriods, [period]: { snapshot } } });
-  };
-  const unlockWeek = () => {
-    const snap = cfg.finalizedPeriods?.[period];
-    if (!snap) return;
-    const backed = { ...cfg.backed };
-    Object.entries(snap.snapshot || {}).forEach(([k, entering]) => { if (backed[k]) backed[k] = { ...backed[k], makeup: entering }; });
-    const fp = { ...cfg.finalizedPeriods };
-    delete fp[period];
-    up({ backed, finalizedPeriods: fp });
-  };
-
-  if (!loaded) return <div style={{ fontFamily: "Georgia, serif", padding: 40, color: "#8A7E6C" }}>Loading saved setup…</div>;
-
-  const theme = cfg.theme === "dark" ? "dark" : "light";
-  const rawMode = cfg.mode || "fishtank";
-  const mode = rawMode === "allamerican" ? "oc:allamerican" : rawMode;
+  const theme = ui.theme === "light" ? "light" : "dark";
+  let mode = ui.mode || (clubs[0] ? "oc:" + clubs[0].id : "tabs");
+  if (mode === "fishtank") mode = "oc:fishtank";
+  if (mode === "allamerican") mode = "oc:allamerican";
   const activeClub = mode.startsWith("oc:") ? clubs.find((c) => c.id === mode.slice(3)) : null;
+  const navBtn = (k, label) => (
+    <button key={k} onClick={() => up({ mode: k })} style={{
+      border: "none", cursor: "pointer", borderRadius: 5, padding: "5px 12px", fontSize: 12.5, fontWeight: 700, whiteSpace: "nowrap",
+      background: mode === k ? "var(--gold)" : "transparent", color: mode === k ? "var(--onGold)" : "var(--barMute)" }}>{label}</button>
+  );
+  const barBtn = { background: "transparent", border: "1px solid var(--barMute)", borderRadius: 6, color: "var(--barText)", cursor: "pointer", padding: "4px 10px", fontSize: 12 };
 
   return (
-    <div style={{ ...PALETTES[theme], minHeight: "100vh", background: C.paper, color: C.ink, fontFamily: "'Avenir Next', 'Segoe UI', system-ui, sans-serif", colorScheme: theme }}>
-      <div style={{ background: C.bar, padding: "18px 26px", display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
-        <div style={{ fontFamily: "Georgia, 'Times New Roman', serif", fontSize: 24, color: "var(--barText)" }}>
-          AK's Book <span style={{ color: "var(--barGold)", fontSize: 15 }}>• weekly accounting</span>
+    <div className="app" style={{ ...PALETTES[theme], minHeight: "100vh", background: C.paper, color: C.ink, fontFamily: "'Avenir Next', 'Segoe UI', system-ui, sans-serif", colorScheme: theme }}>
+      <style>{FIT_CSS}</style>
+      <div style={{ background: C.bar, padding: "12px clamp(10px, 2vw, 26px)", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+        <div style={{ fontFamily: "Georgia, 'Times New Roman', serif", fontSize: 21, color: "var(--barText)" }}>AK's Book</div>
+        <div style={{ display: "flex", gap: 2, background: "rgba(255,255,255,0.08)", borderRadius: 7, padding: 3, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 10, color: "var(--barSubtle)", padding: "0 6px", letterSpacing: ".08em", textTransform: "uppercase" }}>Clubs</span>
+          {clubs.map((c) => navBtn("oc:" + c.id, c.name))}
+          <button onClick={addClub} title="Add a club" style={{ border: "none", cursor: "pointer", borderRadius: 5, padding: "5px 9px", fontSize: 13, fontWeight: 700, background: "transparent", color: "var(--barMute)" }}>+</button>
         </div>
-        <div style={{ display: "flex", gap: 2, background: "rgba(255,255,255,0.08)", borderRadius: 7, padding: 3 }}>
-          {[["fishtank", "Fish Tank"], ...clubs.map((c) => ["oc:" + c.id, c.name]), ["agent", "My Clubs"], ["book", "Book"], ["tabs", "Tabs"], ["archive", "Archive"]].map(([k, label]) => (
-            <button key={k} onClick={() => up({ mode: k })} style={{
-              border: "none", cursor: "pointer", borderRadius: 5, padding: "5px 14px", fontSize: 12.5, fontWeight: 700,
-              background: mode === k ? "var(--gold)" : "transparent",
-              color: mode === k ? "var(--onGold)" : "var(--barMute)" }}>
-              {label}
-            </button>
-          ))}
-          <button onClick={addClub} title="Add an owner club (same weekly export format as All American / Bazaar)" style={{ border: "none", cursor: "pointer", borderRadius: 5, padding: "5px 9px", fontSize: 13, fontWeight: 700, background: "transparent", color: "var(--barMute)" }}>+</button>
+        <div style={{ display: "flex", gap: 2, background: "rgba(255,255,255,0.08)", borderRadius: 7, padding: 3, flexWrap: "wrap" }}>
+          {[["agent", "My Clubs"], ["book", "Book"], ["tabs", "Tabs"], ["archive", "Archive"]].map(([k, l]) => navBtn(k, l))}
         </div>
-        <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
-          {mode === "fishtank" && period && <span style={{ color: "var(--barMute)", fontSize: 12.5 }}>{period}{finalized ? " · finalized" : ""}</span>}
-          {mode === "fishtank" && period && model && <button onClick={archiveNow} title="Store this week's raw upload + generated workbook in the Archive now"
-            style={{ background: "transparent", border: "1px solid var(--barMute)", borderRadius: 6, color: "var(--barText)", cursor: "pointer", padding: "4px 10px", fontSize: 12 }}>Archive this week</button>}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
           <input ref={seedRef} type="file" accept=".json,application/json" style={{ display: "none" }}
             onChange={(e) => { const f = e.target.files?.[0]; if (f) onSeedFile(f); e.target.value = ""; }} />
-          <button onClick={exportSnapshot} title="Download everything (deals, names, clubs, tabs) as a seed file — share it, back it up, or bake it into the app"
-            style={{ background: "transparent", border: "1px solid var(--barMute)", borderRadius: 6, color: "var(--barText)", cursor: "pointer", padding: "4px 10px", fontSize: 12 }}>
-            Export data
-          </button>
-          <button onClick={() => seedRef.current?.click()} title="Load a seed file — fills in deals, names, clubs, and tabs"
-            style={{ background: "transparent", border: "1px solid var(--barMute)", borderRadius: 6, color: "var(--barText)", cursor: "pointer", padding: "4px 10px", fontSize: 12 }}>
-            Import data
-          </button>
-          <button onClick={() => up({ theme: theme === "dark" ? "light" : "dark" })} title="Toggle dark mode"
-            style={{ background: "transparent", border: "1px solid var(--barMute)", borderRadius: 6, color: "var(--barText)", cursor: "pointer", padding: "4px 10px", fontSize: 14 }}>
-            {theme === "dark" ? "☀" : "☾"}
-          </button>
-          <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }}
-            onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = ""; }} />
-          {mode === "fishtank" && <Btn tone="gold" small onClick={() => fileRef.current?.click()}>Upload weekly export</Btn>}
+          <button onClick={exportSnapshot} title="Download all data as a backup file" style={barBtn}>Export</button>
+          <button onClick={() => seedRef.current?.click()} title="Load a backup file" style={barBtn}>Import</button>
+          <button onClick={() => up({ theme: theme === "dark" ? "light" : "dark" })} title="Toggle dark mode" style={{ ...barBtn, fontSize: 14 }}>{theme === "dark" ? "☀" : "☾"}</button>
         </div>
       </div>
+      {err && <div style={{ background: "var(--errBg)", color: C.red, padding: "10px 14px", fontSize: 13.5 }}>{err}</div>}
 
       {mode === "agent" ? (
         <AgentClubs theme={theme} />
@@ -1093,741 +1008,18 @@ export default function App() {
         <BookSection />
       ) : activeClub ? (
         <AllAmerican key={activeClub.id} club={activeClub} clubs={clubs} saveClubs={saveClubs} onDeleteClub={deleteClub} />
-      ) : mode.startsWith("oc:") ? (
-        <div style={{ padding: 40, color: C.mute }}>That club no longer exists. <button onClick={() => up({ mode: "tabs" })} style={{ color: C.goldDark, background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}>Go to Tabs</button></div>
-      ) : mode === "tabs" ? (
-        <TabsLedger clubs={clubs} />
       ) : mode === "archive" ? (
         <ArchiveView clubs={clubs} />
       ) : (
-      <>
-      <div style={{ display: "flex", gap: 4, padding: "10px 26px 0", borderBottom: `2px solid ${C.line}`, background: C.paper, flexWrap: "wrap" }}>
-        {[["settle", "Settlements"], ["agents", "Agent & umbrella reports"], ["backed", "House-backed"], ["recon", "Ak / Jon"], ["deals", "Deals & setup"]].map(([k, label]) => (
-          <button key={k} onClick={() => setTab(k)} style={{
-            border: "none", cursor: "pointer", padding: "9px 16px", fontSize: 13.5, fontWeight: 700,
-            background: tab === k ? C.card : "transparent", color: tab === k ? C.ink : C.mute,
-            borderRadius: "8px 8px 0 0", marginBottom: -2,
-            boxShadow: tab === k ? "0 -1px 4px rgba(0,0,0,0.1)" : "none" }}>
-            {label}
-            {k === "deals" && (needsSetup.deals.length + needsSetup.assigns.length > 0) && (
-              <span style={{ marginLeft: 6, background: C.red, color: "#fff", borderRadius: 9, padding: "1px 7px", fontSize: 10.5 }}>
-                {needsSetup.deals.length + needsSetup.assigns.length}
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
-
-      <div style={{ padding: "20px 26px 60px", maxWidth: 1180, margin: "0 auto" }}>
-        {err && <div style={{ background: "var(--errBg)", color: C.red, padding: "10px 14px", borderRadius: 6, marginBottom: 14, fontSize: 13.5 }}>{err}</div>}
-        {saveNote && <div style={{ background: C.banner, color: C.goldDark, padding: "8px 14px", borderRadius: 6, marginBottom: 14, fontSize: 12.5 }}>{saveNote}</div>}
-
-        {!players && (
-          <div style={{ background: C.card, border: `1px dashed ${C.gold}`, borderRadius: 10, padding: "50px 30px", textAlign: "center" }}>
-            <div style={{ fontFamily: "Georgia, serif", fontSize: 20, marginBottom: 8 }}>Start the week</div>
-            <div style={{ color: C.mute, fontSize: 14, marginBottom: 18 }}>Upload the club's weekly .xlsx export. Deals, umbrellas, backed-player ledgers, and fees are saved and apply automatically.</div>
-            <Btn onClick={() => fileRef.current?.click()}>Choose file</Btn>
-          </div>
-        )}
-
-        {players && model && tab === "settle" && <SettleTab model={model} cfg={cfg} needsSetup={needsSetup} goDeals={() => setTab("deals")} period={period} />}
-        {players && model && tab === "agents" && <AgentsTab model={model} expanded={expanded} setExpanded={setExpanded} period={period} />}
-        {players && model && tab === "backed" && <BackedTab model={model} cfg={cfg} up={up} finalized={finalized} lockWeek={lockWeek} unlockWeek={unlockWeek} />}
-        {players && model && tab === "recon" && <ReconTab model={model} cfg={cfg} up={up} period={period} />}
-        {players && model && tab === "deals" && <DealsTab model={model} cfg={cfg} up={up} needsSetup={needsSetup} weekAdj={weekAdj} setAdj={setAdj} />}
-      </div>
-      </>
+        <TabsLedger clubs={clubs} />
       )}
     </div>
   );
 }
-
-// ———————————————— Settlements ————————————————
-function SettleTab({ model, cfg, needsSetup, goDeals, period }) {
-  const t = model.totals;
-  const pending = needsSetup.deals.length + needsSetup.assigns.length;
-  const [exportData, setExportData] = useState(null);
-  const exportCsv = () =>
-    setExportData({
-      title: `Settlements · ${period || "this week"}`,
-      text: toTSV(["Deal", "Type", "Hands", "Winnings", "Tips", "Avg TB %", "Tipback", "Settlement"],
-        model.entities.map((e) => [e.name, e.type, e.hands, e.pnl.toFixed(2), e.fee.toFixed(2), e.fee ? ((e.tipback / e.fee) * 100).toFixed(1) : "", e.tipback.toFixed(2), e.settlement.toFixed(2)])),
-    });
-
-  return (
-    <div>
-      <ExportModal data={exportData} onClose={() => setExportData(null)} />
-      {pending > 0 && (
-        <div style={{ background: C.banner, border: `1px solid ${C.gold}`, borderRadius: 8, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ fontSize: 13.5 }}>
-            <b>{pending} item{pending > 1 ? "s" : ""} need review this week</b> — {needsSetup.deals.length > 0 && `${needsSetup.deals.length} deal${needsSetup.deals.length > 1 ? "s" : ""} to confirm`}{needsSetup.deals.length > 0 && needsSetup.assigns.length > 0 && ", "}{needsSetup.assigns.length > 0 && `${needsSetup.assigns.length} unassigned to Ak/Jon`}. Unconfirmed deals use the default {cfg.defaultTB}%.
-          </div>
-          <div style={{ marginLeft: "auto" }}><Btn tone="gold" small onClick={goDeals}>Review now</Btn></div>
-        </div>
-      )}
-
-      <div style={{ display: "flex", alignItems: "baseline", marginBottom: 10 }}>
-        <div style={{ fontFamily: "Georgia, serif", fontSize: 19 }}>What every deal owes</div>
-        <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-          <Btn tone="gold" small onClick={() => {
-            if (model.unassigned.length > 0) {
-              window.alert(`Assign ${model.unassigned.length} remaining deal${model.unassigned.length > 1 ? "s" : ""} to Ak or Jon first (Ak / Jon tab). The workbook includes each owner's collection list and the final Ak↔Jon transfer, so it needs every deal assigned.`);
-              return;
-            }
-            downloadWorkbook(model, period, cfg);
-          }}>Download Excel workbook</Btn>
-          <Btn tone="ghost" small onClick={exportCsv}>Copy table</Btn>
-        </div>
-      </div>
-      <div style={{ color: C.mute, fontSize: 12.5, marginBottom: 12 }}>
-        <span style={{ color: C.green, fontWeight: 700 }}>Green</span> = you pay them · <span style={{ color: C.red, fontWeight: 700 }}>red</span> = they pay you.
-        Umbrellas and super agents settle as one line; no-SA players settle individually. Makeup players' settlement is their share of profit above makeup only (RB is a credit inside their net); action buys settle the player's share of P&L + RB. Owner accounts are excluded (see Ak / Jon).
-      </div>
-
-      <div style={{ background: C.card, borderRadius: 10, overflow: "hidden", boxShadow: "0 1px 6px rgba(0,0,0,0.15)" }}>
-        <div style={{ background: C.bar, color: "var(--barText)", display: "grid", gridTemplateColumns: "minmax(200px,1.5fr) repeat(6, 1fr)", padding: "13px 10px", alignItems: "center" }}>
-          <div style={{ paddingLeft: 10, fontFamily: "Georgia, serif", fontSize: 16 }}>Grand Total</div>
-          {[fmtI(t.hands), fmt(t.pnl), fmt(t.fee), t.fee ? ((t.tipback / t.fee) * 100).toFixed(0) + "%" : "—", fmt(t.tipback)].map((v, i) => (
-            <div key={i} style={{ textAlign: "right", paddingRight: 10, fontVariantNumeric: "tabular-nums", fontSize: 14.5 }}>{v}</div>
-          ))}
-          <div style={{ textAlign: "right", paddingRight: 10, fontVariantNumeric: "tabular-nums", fontSize: 14.5, color: t.settlement >= 0 ? "var(--barGreen)" : "var(--barRed)", fontWeight: 700 }}>{fmt(t.settlement)}</div>
-        </div>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: C.cream }}>
-            <th style={{ ...th, textAlign: "left" }}>Deal name</th>
-            <th style={th}>Hands</th><th style={th}>Winnings</th><th style={th}>Tips</th><th style={th}>Avg TB %</th><th style={th}>Tipback</th><th style={th}>Settlement</th>
-          </tr></thead>
-          <tbody>
-            {model.entities.map((e, i) => (
-              <tr key={e.key} style={{ background: i % 2 ? C.rowAlt : C.card, borderTop: `1px solid ${C.line}` }}>
-                <td style={tdL}>
-                  <span style={{ fontWeight: 600 }}>{e.name}</span> {typePill(e)}
-                  {e.adjusted && <span style={{ marginLeft: 6 }}><Pill tone="blue">mid-week deal</Pill></span>}
-                  {e.type === "backed" && e.dealType === "makeup" && e.inMakeup && <span style={{ marginLeft: 6 }}><Pill tone="red">in makeup</Pill></span>}
-                  {e.type === "player" && e.members[0].actionTaxPct ? <span style={{ marginLeft: 6 }}><Pill tone="blue">action {e.members[0].actionTaxPct}%</Pill></span> : null}
-                </td>
-                <td style={td}>{fmtI(e.hands)}</td>
-                <td style={td}>{fmt(e.pnl)}</td>
-                <td style={td}>{fmt(e.fee)}</td>
-                <td style={td}>{e.fee ? ((e.tipback / e.fee) * 100).toFixed(0) + "%" : "—"}</td>
-                <td style={td}>{fmt(e.tipback)}</td>
-                <td style={td}>{money(e.settlement)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-// ———————————————— Agent & umbrella reports ————————————————
-function AgentsTab({ model, expanded, setExpanded, period }) {
-  const groups = [...model.umbEntities, ...model.looseSAs];
-  const [exportData, setExportData] = useState(null);
-  const exportOne = (e, members) => {
-    const rows = members.map((m) => [m.name, m.memberId, m.saName, m.agentName, m.hands, m.pnl.toFixed(2), m.fee.toFixed(2), m.tbPct, m.tipback.toFixed(2), m.settlement.toFixed(2)]);
-    const total = ["TOTAL", "", "", "", e.hands, e.pnl.toFixed(2), e.fee.toFixed(2), e.fee ? ((e.tipback / e.fee) * 100).toFixed(1) : "", e.tipback.toFixed(2), e.settlement.toFixed(2)];
-    setExportData({
-      title: `${e.name} · ${period || "this week"}`,
-      text: toTSV(["Player", "Device ID", "Super Agent", "Agent", "Hands", "Winnings", "Tips", "TB %", "Tipback", "Settlement"], [...rows, total]),
-    });
-  };
-
-  const memberTable = (members, total) => (
-    <table style={{ width: "100%", borderCollapse: "collapse" }}>
-      <thead><tr>
-        <th style={{ ...th, textAlign: "left" }}>Player</th><th style={{ ...th, textAlign: "left" }}>Device ID</th><th style={{ ...th, textAlign: "left" }}>Agent</th>
-        <th style={th}>Hands</th><th style={th}>Winnings</th><th style={th}>Tips</th><th style={th}>TB %</th><th style={th}>Tipback</th><th style={th}>Settlement</th>
-      </tr></thead>
-      <tbody>
-        {[...members].sort((a, b) => b.fee - a.fee).map((m, i) => (
-          <tr key={m.memberId + i} style={{ background: i % 2 ? C.rowAlt : C.card, borderTop: `1px solid ${C.line}` }}>
-            <td style={{ ...tdL, fontWeight: 600 }}>{m.name}{m.actionTaxPct ? <span style={{ marginLeft: 6 }}><Pill tone="blue">action {m.actionTaxPct}%</Pill></span> : null}</td>
-            <td style={{ ...tdL, color: C.mute, fontSize: 12 }}>{m.memberId}</td>
-            <td style={{ ...tdL, color: C.mute, fontSize: 12 }}>{m.agentName}</td>
-            <td style={td}>{fmtI(m.hands)}</td><td style={td}>{fmt(m.pnl)}</td><td style={td}>{fmt(m.fee)}</td>
-            <td style={td}>{m.tbPct}%</td><td style={td}>{fmt(m.tipback)}</td><td style={td}>{money(m.settlement)}</td>
-          </tr>
-        ))}
-        <tr style={{ background: C.cream, borderTop: `2px solid ${C.gold}` }}>
-          <td style={{ ...tdL, fontWeight: 700 }} colSpan={3}>Total</td>
-          <td style={{ ...td, fontWeight: 700 }}>{fmtI(total.hands)}</td>
-          <td style={{ ...td, fontWeight: 700 }}>{fmt(total.pnl)}</td>
-          <td style={{ ...td, fontWeight: 700 }}>{fmt(total.fee)}</td>
-          <td style={td}>{total.fee ? ((total.tipback / total.fee) * 100).toFixed(0) + "%" : "—"}</td>
-          <td style={{ ...td, fontWeight: 700 }}>{fmt(total.tipback)}</td>
-          <td style={{ ...td, fontWeight: 700 }}>{money(total.settlement)}</td>
-        </tr>
-      </tbody>
-    </table>
-  );
-
-  return (
-    <div>
-      <ExportModal data={exportData} onClose={() => setExportData(null)} />
-      <div style={{ fontFamily: "Georgia, serif", fontSize: 19, marginBottom: 4 }}>Reports for each deal</div>
-      <div style={{ color: C.mute, fontSize: 12.5, marginBottom: 14 }}>Click a row to expand; export a CSV to send them. Umbrella reports break out each super agent inside.</div>
-      {groups.map((e) => {
-        const open = expanded[e.key];
-        return (
-          <div key={e.key} style={{ background: C.card, borderRadius: 10, marginBottom: 10, overflow: "hidden", boxShadow: "0 1px 5px rgba(0,0,0,0.15)" }}>
-            <div onClick={() => setExpanded({ ...expanded, [e.key]: !open })} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 16px", cursor: "pointer", background: C.cream }}>
-              <span style={{ color: C.goldDark, fontSize: 12, width: 12 }}>{open ? "▼" : "►"}</span>
-              <span style={{ fontWeight: 700, fontSize: 14.5 }}>{e.name}</span>
-              {typePill(e)}
-              <span style={{ color: C.mute, fontSize: 12 }}>{e.members.length} player{e.members.length !== 1 ? "s" : ""} · {fmtI(e.hands)} hands</span>
-              <span style={{ marginLeft: "auto", fontSize: 13.5 }}>settlement {money(e.settlement)}</span>
-              <Btn tone="gold" small onClick={(ev) => { ev.stopPropagation(); downloadDealExcel(e, period); }}>Excel</Btn>
-              <Btn tone="ghost" small onClick={(ev) => { ev.stopPropagation(); exportOne(e, e.members); }}>Copy</Btn>
-            </div>
-            {open && (e.type === "umbrella"
-              ? e.subgroups.map((s) => (
-                  <div key={s.key} style={{ borderTop: `1px solid ${C.line}` }}>
-                    <div style={{ padding: "8px 16px", fontSize: 13, fontWeight: 700, color: C.goldDark, background: C.rowAlt }}>
-                      {s.name} — settlement {money(s.settlement)}
-                    </div>
-                    {memberTable(s.members, s)}
-                  </div>
-                ))
-              : memberTable(e.members, e))}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ———————————————— House-backed tab ————————————————
-function BackedTab({ model, cfg, up, finalized, lockWeek, unlockWeek }) {
-  const [newName, setNewName] = useState("");
-  const [newDeal, setNewDeal] = useState("makeup");
-  const addBacked = () => {
-    const k = newName.trim().toLowerCase();
-    if (!k) return;
-    const base = newDeal === "action"
-      ? { name: newName.trim(), deal: "action", actionPct: 50, rbPct: 100, backer: "jon" }
-      : { name: newName.trim(), deal: "makeup", rbNormal: cfg.defaultTB, rbMakeup: 100, makeup: 0, playerProfitPct: 50, backer: "split" };
-    up({ backed: { ...cfg.backed, [k]: base } });
-    setNewName("");
-  };
-  const setB = (k, patch) => up({ backed: { ...cfg.backed, [k]: { ...cfg.backed[k], ...patch } } });
-  const removeB = (k) => { const b = { ...cfg.backed }; delete b[k]; up({ backed: b }); };
-  const findE = (k) => model.backedEntities.find((x) => x.key === `b:${k}`);
-  const backerSel = (k, b, withSplit) => (
-    <select value={b.backer} onChange={(e) => setB(k, { backer: e.target.value })} style={{ ...inputS, padding: "4px 6px", fontSize: 12 }}>
-      {withSplit && <option value="split">Ak & Jon 50/50</option>}
-      <option value="ak">Ak</option><option value="jon">Jon</option>
-    </select>
-  );
-
-  const makeupPlayers = Object.entries(cfg.backed).filter(([, b]) => b.deal !== "action");
-  const actionPlayers = Object.entries(cfg.backed).filter(([, b]) => b.deal === "action");
-
-  return (
-    <div>
-      <div style={{ display: "flex", alignItems: "center", marginBottom: 4, gap: 10, flexWrap: "wrap" }}>
-        <div style={{ fontFamily: "Georgia, serif", fontSize: 19 }}>House-backed players</div>
-        <div style={{ marginLeft: "auto" }}>
-          {finalized
-            ? <Btn tone="ghost" small onClick={unlockWeek}>🔒 Week locked · unlock to edit</Btn>
-            : <Btn tone="gold" small onClick={lockWeek}>Lock week — roll makeup forward</Btn>}
-        </div>
-      </div>
-      <div style={{ color: C.mute, fontSize: 12.5, marginBottom: 16 }}>
-        <b>Makeup deals</b>: the week's net = P&L + RB credit. Above makeup, the player is paid their % of the excess and the backer books the rest; below, no cash moves and the net accrues to makeup on the backer's book. The margin on their fees stays in split club profit. RB rate follows makeup <b>entering</b> the week; Lock once to roll it forward. If you need to fix something after locking, unlock — the roll reverts so you can edit — then lock again to re-snapshot off the corrected numbers. If this week was already accepted into Tabs, re-sync it from Tabs → Bookkeeping afterward so the ledger picks up the correction cleanly (no double-posting).
-        {" "}<b>Action buys</b>: the backer owns their % of (P&L + rakeback); the player settles the remainder.
-        {" "}Paste a Tabs → Staking makeup deal's ID into <b>Unified deal</b> on a row to fold that player's weekly net into one shared, ongoing pool across sites (and manual/external games) instead of tracking makeup locally here — the local balance freezes and the deal's own % staked / chop handle the tab. Use a "settle per session" deal (the default) so this week's report and any mid-week manual results each update the running makeup as they're logged, in the order they happened, rather than getting batched into one lump sum.
-      </div>
-
-      <div style={{ fontSize: 13, fontWeight: 700, color: C.goldDark, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>Makeup deals</div>
-      <div style={{ background: C.card, borderRadius: 10, overflow: "auto", boxShadow: "0 1px 6px rgba(0,0,0,0.15)", marginBottom: 20 }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: C.cream }}>
-            <th style={{ ...th, textAlign: "left" }}>Player</th><th style={{ ...th, textAlign: "left" }}>Backer</th>
-            <th style={th}>Makeup entering</th><th style={{ ...th, textAlign: "center" }}>Status</th>
-            <th style={th}>RB % normal</th><th style={th}>RB % makeup</th><th style={th}>Player profit %</th>
-            <th style={th}>Tips</th><th style={th}>P&L</th><th style={th}>RB credit</th><th style={th}>Net</th><th style={th}>Settlement</th><th style={th}>Makeup after</th><th style={th}>Unified deal</th><th style={th}></th>
-          </tr></thead>
-          <tbody>
-            {makeupPlayers.map(([k, b], i) => {
-              const e = findE(k);
-              return (
-                <tr key={k} style={{ background: i % 2 ? C.rowAlt : C.card, borderTop: `1px solid ${C.line}` }}>
-                  <td style={{ ...tdL, fontWeight: 600 }}>
-                    {b.name}
-                    {!e && <span style={{ marginLeft: 8 }}><Pill tone="gold">no play</Pill></span>}
-                  </td>
-                  <td style={tdL}>{backerSel(k, b, true)}</td>
-                  <td style={td}><NumInput width={85} value={b.makeup} onChange={(v) => setB(k, { makeup: v })} /></td>
-                  <td style={{ ...td, textAlign: "center" }}>{(b.makeup || 0) > 0.005 ? <Pill tone="red">in makeup</Pill> : <Pill tone="green">clear</Pill>}</td>
-                  <td style={td}>
-                    <span style={{ opacity: (b.makeup || 0) > 0.005 ? 0.35 : 1 }}>
-                      <PctInput width={46} max={999} value={b.rbNormal} onChange={(v) => v != null && setB(k, { rbNormal: v })} />
-                    </span>
-                    {(b.makeup || 0) <= 0.005 && <div style={{ fontSize: 9.5, color: C.green, fontWeight: 700, marginTop: 2 }}>ACTIVE</div>}
-                  </td>
-                  <td style={td}>
-                    <span style={{ opacity: (b.makeup || 0) > 0.005 ? 1 : 0.35 }}>
-                      <PctInput width={46} max={999} value={b.rbMakeup} onChange={(v) => v != null && setB(k, { rbMakeup: v })} />
-                    </span>
-                    {(b.makeup || 0) > 0.005 && <div style={{ fontSize: 9.5, color: C.green, fontWeight: 700, marginTop: 2 }}>ACTIVE</div>}
-                  </td>
-                  <td style={td}><PctInput width={46} value={b.playerProfitPct ?? 50} onChange={(v) => v != null && setB(k, { playerProfitPct: v })} /></td>
-                  <td style={td}>{e ? fmt(e.fee) : "—"}</td>
-                  <td style={td}>{e ? money(e.pnl) : "—"}</td>
-                  <td style={td}>{e ? <>{fmt(e.tipback)} <span style={{ color: C.mute, fontSize: 11 }}>@{e.rb}%</span></> : "—"}</td>
-                  <td style={td}>{e ? money(e.net) : "—"}</td>
-                  <td style={td}>{e ? <b>{fmt(e.settlement)}</b> : "—"}</td>
-                  <td style={td}>{e ? fmt(e.makeupAfter) : fmt(b.makeup || 0)}</td>
-                  <td style={td}>
-                    <input placeholder="deal id" value={b.unifiedDealId || ""} onChange={(ev) => setB(k, { unifiedDealId: ev.target.value.trim() })} style={{ ...inputS, width: 88, fontSize: 11 }} title="Paste a Tabs → Staking makeup deal's ID to fold this player's weekly net into that shared, ongoing pool instead of tracking makeup locally here. Use a 'settle per session' deal so it updates alongside any mid-week manual results in the order they happened." />
-                    {b.unifiedDealId && <div style={{ fontSize: 9.5, color: C.goldDark, fontWeight: 700, marginTop: 2 }}>UNIFIED</div>}
-                  </td>
-                  <td style={td}><button onClick={() => removeB(k)} style={{ border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 15 }}>×</button></td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      <div style={{ fontSize: 13, fontWeight: 700, color: C.goldDark, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>Action buys</div>
-      <div style={{ background: C.card, borderRadius: 10, overflow: "auto", boxShadow: "0 1px 6px rgba(0,0,0,0.15)", marginBottom: 20 }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: C.cream }}>
-            <th style={{ ...th, textAlign: "left" }}>Player</th><th style={{ ...th, textAlign: "left" }}>Backer</th>
-            <th style={th}>Backer action %</th><th style={th}>RB %</th>
-            <th style={th}>Tips</th><th style={th}>Week P&L</th><th style={th}>Player settlement</th><th style={th}>Backer book</th><th style={th}></th>
-          </tr></thead>
-          <tbody>
-            {actionPlayers.map(([k, b], i) => {
-              const e = findE(k);
-              return (
-                <tr key={k} style={{ background: i % 2 ? C.rowAlt : C.card, borderTop: `1px solid ${C.line}` }}>
-                  <td style={{ ...tdL, fontWeight: 600 }}>
-                    {b.name}
-                    {!e && <span style={{ marginLeft: 8 }}><Pill tone="gold">no play</Pill></span>}
-                  </td>
-                  <td style={tdL}>{backerSel(k, b, false)}</td>
-                  <td style={td}><PctInput width={46} value={b.actionPct} onChange={(v) => v != null && setB(k, { actionPct: v })} /></td>
-                  <td style={td}><PctInput width={46} max={999} value={b.rbPct ?? 100} onChange={(v) => v != null && setB(k, { rbPct: v })} /></td>
-                  <td style={td}>{e ? fmt(e.fee) : "—"}</td>
-                  <td style={td}>{e ? money(e.pnl) : "—"}</td>
-                  <td style={td}>{e ? <b>{fmt(e.settlement)}</b> : "—"}</td>
-                  <td style={td}>{e ? money(e.backerBook) : "—"}</td>
-                  <td style={td}><button onClick={() => removeB(k)} style={{ border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 15 }}>×</button></td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-        <input placeholder="Add backed player by exact nickname…" value={newName} onChange={(e) => setNewName(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && addBacked()} style={{ ...inputS, width: 260 }} />
-        <select value={newDeal} onChange={(e) => setNewDeal(e.target.value)} style={{ ...inputS, fontSize: 12 }}>
-          <option value="makeup">Makeup deal</option><option value="action">Action buy</option>
-        </select>
-        <Btn tone="ghost" small onClick={addBacked}>+ Add</Btn>
-        <div style={{ marginLeft: "auto", fontSize: 13 }}>
-          Backed books this week — Ak: <b>{money(model.backedBook.ak)}</b> · Jon: <b>{money(model.backedBook.jon)}</b>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ———————————————— Ak / Jon reconciliation ————————————————
-function ReconTab({ model, cfg, up, period }) {
-  const m = model;
-  const assign = (key, who) => up({ assignments: { ...cfg.assignments, [key]: who } });
-  const assignAll = (who) => { const a = { ...cfg.assignments }; m.unassigned.forEach((e) => (a[e.key] = who)); up({ assignments: a }); };
-  const owePos = m.akOwesJon > 0.005, oweNeg = m.akOwesJon < -0.005;
-
-  const row = (label, val, opts = {}) => (
-    <div style={{ display: "flex", padding: "6px 0", borderBottom: opts.rule ? `1px solid ${C.line}` : "none", fontSize: 13.5 }}>
-      <span style={{ color: opts.bold ? C.ink : C.mute, fontWeight: opts.bold ? 700 : 400 }}>{label}</span>
-      <span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums", fontWeight: opts.bold ? 700 : 500 }}>{typeof val === "number" ? money(val) : val}</span>
-    </div>
-  );
-
-  return (
-    <div>
-      <div style={{ background: C.bar, borderRadius: 12, padding: "26px 30px", marginBottom: 18, textAlign: "center", color: "var(--barText)" }}>
-        <div style={{ fontSize: 12, letterSpacing: "0.12em", textTransform: "uppercase", color: "var(--barGold)", marginBottom: 6 }}>Owner balance · {period || "this week"}</div>
-        {m.unassigned.length > 0 ? (
-          <div style={{ fontSize: 17 }}>Assign the {m.unassigned.length} remaining deal{m.unassigned.length > 1 ? "s" : ""} below to get the final number.</div>
-        ) : (
-          <div style={{ fontFamily: "Georgia, serif", fontSize: 30 }}>
-            {owePos && <>Ak pays Jon <span style={{ color: "var(--barGold)" }}>{fmt(m.akOwesJon)}</span></>}
-            {oweNeg && <>Jon pays Ak <span style={{ color: "var(--barGold)" }}>{fmt(-m.akOwesJon)}</span></>}
-            {!owePos && !oweNeg && <>Perfectly even — no transfer needed</>}
-          </div>
-        )}
-        <div style={{ fontSize: 12, color: "var(--barSubtle)", marginTop: 8 }}>
-          After this transfer each of you nets exactly: half of net club profit + your own accounts' P&L with 100% feeback + your backed books{m.feeRows.some((f) => f.recipient !== "external") ? " + any fee routed to you" : ""}.
-          {m.balanceOk ? " Balance check: ✓ books tie out." : m.unassigned.length === 0 ? " ⚠ Balance check failed — review setup." : ""}
-        </div>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(310px, 1fr))", gap: 14, marginBottom: 18 }}>
-        <Card title="Club economics">
-          {row("Total tips collected (all accounts)", m.clubRevenue)}
-          {row("Tipbacks to agents & players", -m.extTipbacks)}
-          {row("Backed players' RB (cash + credits)", -m.backedRB)}
-          {row("Owner accounts' 100% feeback", -m.ownFeeback, { rule: true })}
-          {row("Club profit", m.clubProfit, { bold: true })}
-          {m.feeRows.map((f) => row(`${f.label} · ${f.kind === "fixed" ? "fixed" : `${f.pct}% of ${cfg.feeBase === "gross" ? "tips" : "profit"}`}${f.recipient !== "external" ? ` → ${f.recipient === "ak" ? "Ak" : "Jon"}` : ""}`, -f.amount))}
-          <div style={{ borderTop: `1px solid ${C.line}` }} />
-          {row("Net profit to split", m.netProfit, { bold: true })}
-          {row("Each owner's half", m.netProfit / 2)}
-        </Card>
-        {["ak", "jon"].map((w) => (
-          <Card key={w} title={`${w === "ak" ? "Ak" : "Jon"}'s position`}>
-            {m.own.filter((p) => p.owner === w).map((p) => row(`${p.name} · P&L ${fmt(p.pnl)} + feeback ${fmt(p.feeback)}`, p.position))}
-            {m.own.filter((p) => p.owner === w).length === 0 && <div style={{ color: C.mute, fontSize: 12.5 }}>No activity from these accounts this week.</div>}
-            <div style={{ borderTop: `1px solid ${C.line}` }} />
-            {row("Own accounts (P&L + 100% feeback)", m.ownPosition[w], { bold: true })}
-            {row("Backed books", m.backedBook[w])}
-            {row("Action-buy tax book", m.taxBook[w])}
-            {row("Half of net club profit", m.netProfit / 2)}
-            {row("Entitlement (all-in)", m.entitle[w], { bold: true })}
-            {row("Actual cash from assigned settlements", m.actual[w])}
-          </Card>
-        ))}
-      </div>
-
-      <Card title="Who settles with whom" right={m.unassigned.length > 0 && (
-        <span style={{ display: "flex", gap: 8 }}>
-          <Btn tone="ghost" small onClick={() => assignAll("ak")}>Rest → Ak</Btn>
-          <Btn tone="ghost" small onClick={() => assignAll("jon")}>Rest → Jon</Btn>
-        </span>
-      )}>
-        <div style={{ color: C.mute, fontSize: 12.5, marginBottom: 10 }}>Mark who physically settles each deal. Remembered for future weeks.</div>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: C.cream }}>
-            <th style={{ ...th, textAlign: "left" }}>Deal</th><th style={th}>Settlement</th><th style={{ ...th, textAlign: "center" }}>Settled by</th>
-          </tr></thead>
-          <tbody>
-            {m.entities.map((e, i) => {
-              const who = cfg.assignments[e.key];
-              return (
-                <tr key={e.key} style={{ background: i % 2 ? C.rowAlt : C.card, borderTop: `1px solid ${C.line}` }}>
-                  <td style={tdL}><b>{e.name}</b> {typePill(e)}</td>
-                  <td style={td}>{money(e.settlement)}</td>
-                  <td style={{ ...td, textAlign: "center" }}>
-                    {["ak", "jon"].map((w) => (
-                      <button key={w} onClick={() => assign(e.key, w)} style={{
-                        margin: "0 3px", padding: "4px 14px", borderRadius: 5, cursor: "pointer", fontSize: 12, fontWeight: 700,
-                        border: `1px solid ${who === w ? C.goldDark : C.line}`,
-                        background: who === w ? C.gold : C.surface, color: who === w ? "var(--onGold)" : C.mute }}>
-                        {w === "ak" ? "Ak" : "Jon"}
-                      </button>
-                    ))}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </Card>
-    </div>
-  );
-}
-
-// ———————————————— Deals & setup ————————————————
-function DealsTab({ model, cfg, up, needsSetup, weekAdj, setAdj }) {
-  const [showAllSA, setShowAllSA] = useState({});
-  const [umbName, setUmbName] = useState("");
-  const [adjTarget, setAdjTarget] = useState("");
-  const [taxTarget, setTaxTarget] = useState("");
-  const taxTargets = [...new Map([...model.saEntities, ...model.indEntities].flatMap((e) => e.members).map((m) => [m.memberId, m])).values()].sort((a, b) => b.fee - a.fee);
-  const addTax = () => {
-    if (!taxTarget) return;
-    up({ actionTax: { ...(cfg.actionTax || {}), [taxTarget]: { pct: 20, backer: "split" } } });
-    setTaxTarget("");
-  };
-
-  const allSAs = [...model.looseSAs, ...model.umbEntities.flatMap((u) => u.subgroups)].sort((a, b) => b.fee - a.fee);
-  const inds = model.indEntities;
-  const omit = (o, k) => { const x = { ...o }; delete x[k]; return x; };
-
-  const setSA = (id, pct) => up({ saDeals: pct == null ? omit(cfg.saDeals, id) : { ...cfg.saDeals, [id]: pct }, confirmedSAs: { ...cfg.confirmedSAs, [id]: true } });
-  const setPlayer = (id, pct, isInd) => {
-    const patch = { playerDeals: pct == null ? omit(cfg.playerDeals, id) : { ...cfg.playerDeals, [id]: pct } };
-    if (isInd) patch.confirmedPlayers = { ...cfg.confirmedPlayers, [id]: true };
-    up(patch);
-  };
-  const confirmAll = () => {
-    const cs = { ...cfg.confirmedSAs }, cp = { ...cfg.confirmedPlayers };
-    allSAs.forEach((e) => (cs[e.id] = true)); inds.forEach((e) => (cp[e.id] = true));
-    up({ confirmedSAs: cs, confirmedPlayers: cp });
-  };
-
-  const addUmbrella = () => { if (!umbName.trim()) return; up({ umbrellas: [...cfg.umbrellas, { id: "u" + Date.now(), name: umbName.trim(), saIds: [] }] }); setUmbName(""); };
-  const toggleSAinUmb = (uid, saId) => {
-    up({ umbrellas: cfg.umbrellas.map((u) => {
-      if (u.id === uid) return { ...u, saIds: u.saIds.includes(saId) ? u.saIds.filter((x) => x !== saId) : [...u.saIds, saId] };
-      return { ...u, saIds: u.saIds.filter((x) => x !== saId) };
-    }) });
-  };
-  const saOptions = allSAs.map((e) => ({ id: e.id, name: e.name }));
-  Object.entries(cfg.names).forEach(([id, name]) => {
-    if (cfg.saDeals[id] !== undefined && !saOptions.find((o) => o.id === id)) saOptions.push({ id, name });
-  });
-
-  const adjTargets = [
-    ...allSAs.map((e) => ({ key: e.key, label: `${e.name} (SA)`, fee: e.fee })),
-    ...inds.map((e) => ({ key: e.key, label: `${e.name} (player)`, fee: e.fee })),
-    ...model.backedEntities.map((e) => ({ key: e.key, label: `${e.name} (backed)`, fee: e.fee })),
-  ];
-  const addAdj = () => {
-    if (!adjTarget) return;
-    setAdj({ ...weekAdj, [adjTarget]: { amtA: 0, rateA: cfg.defaultTB, rateB: cfg.defaultTB } });
-    setAdjTarget("");
-  };
-  const setAdjField = (key, patch) => setAdj({ ...weekAdj, [key]: { ...weekAdj[key], ...patch } });
-  const removeAdj = (key) => { const a = { ...weekAdj }; delete a[key]; setAdj(a); };
-
-  const newBadge = (isNew) => isNew && <Pill tone="red">confirm</Pill>;
-
-  return (
-    <div>
-      {needsSetup.deals.length > 0 && (
-        <div style={{ background: C.banner, border: `1px solid ${C.gold}`, borderRadius: 8, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center" }}>
-          <div style={{ fontSize: 13.5 }}><b>New this week:</b> {needsSetup.deals.map((e) => e.name).join(", ")} — set or confirm their deals below.</div>
-          <div style={{ marginLeft: "auto" }}><Btn tone="gold" small onClick={confirmAll}>Everything's right — confirm all</Btn></div>
-        </div>
-      )}
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(330px, 1fr))", gap: 14, marginBottom: 16 }}>
-        <Card title="Defaults & fees">
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, fontSize: 13.5 }}>
-            Default tipback for anyone without a deal
-            <span style={{ marginLeft: "auto" }}><PctInput max={999} value={cfg.defaultTB} onChange={(v) => v != null && up({ defaultTB: v })} /></span>
-          </div>
-          <div style={{ fontSize: 12, color: C.mute, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.08em" }}>Cut fees</div>
-          {cfg.fees.map((f, i) => (
-            <div key={f.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 13 }}>
-              <input value={f.label} onChange={(e) => { const fees = [...cfg.fees]; fees[i] = { ...f, label: e.target.value }; up({ fees }); }} style={{ ...inputS, flex: 1 }} />
-              <select value={f.kind === "fixed" ? "fixed" : "pct"} onChange={(e) => { const fees = [...cfg.fees]; fees[i] = { ...f, kind: e.target.value === "fixed" ? "fixed" : "pct" }; up({ fees }); }} style={{ ...inputS, padding: "5px 6px", fontSize: 12 }}>
-                <option value="pct">%</option><option value="fixed">$</option>
-              </select>
-              {f.kind === "fixed"
-                ? <NumInput width={72} value={f.amount ?? 0} onChange={(v) => { const fees = [...cfg.fees]; fees[i] = { ...f, amount: v }; up({ fees }); }} />
-                : <PctInput width={52} value={f.pct} onChange={(v) => { if (v == null) return; const fees = [...cfg.fees]; fees[i] = { ...f, pct: v }; up({ fees }); }} />}
-              <select value={f.recipient} onChange={(e) => { const fees = [...cfg.fees]; fees[i] = { ...f, recipient: e.target.value }; up({ fees }); }} style={{ ...inputS, padding: "5px 6px", fontSize: 12 }}>
-                <option value="external">→ outside</option><option value="ak">→ Ak</option><option value="jon">→ Jon</option>
-              </select>
-              <button onClick={() => up({ fees: cfg.fees.filter((_, j) => j !== i) })} style={{ border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 15 }}>×</button>
-            </div>
-          ))}
-          <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
-            <Btn tone="ghost" small onClick={() => up({ fees: [...cfg.fees, { id: "f" + Date.now(), label: "New fee", pct: 1, recipient: "external", paidBy: "split" }] })}>+ Add fee</Btn>
-            <label style={{ marginLeft: "auto", fontSize: 12, color: C.mute }}>
-              Fees are % of{" "}
-              <select value={cfg.feeBase} onChange={(e) => up({ feeBase: e.target.value })} style={{ ...inputS, padding: "3px 6px", fontSize: 12 }}>
-                <option value="net">club profit (after tipbacks)</option>
-                <option value="gross">gross tips collected</option>
-              </select>
-            </label>
-          </div>
-        </Card>
-
-        <Card title="Owner accounts">
-          <div style={{ fontSize: 12, color: C.mute, marginBottom: 10 }}>House play: 100% feeback, excluded from settlements, P&L + feeback credited to the owner. One nickname per line. Backed players are managed on the House-backed tab.</div>
-          {["ak", "jon"].map((w) => (
-            <div key={w} style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: C.goldDark, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>{w === "ak" ? "Ak" : "Jon"}</div>
-              <textarea defaultValue={cfg.ownAccounts[w].join("\n")}
-                onBlur={(e) => up({ ownAccounts: { ...cfg.ownAccounts, [w]: e.target.value.split("\n").map((s) => s.trim()).filter(Boolean) } })}
-                rows={2}
-                style={{ ...inputS, width: "100%", boxSizing: "border-box", fontFamily: "inherit", resize: "vertical" }} />
-            </div>
-          ))}
-        </Card>
-      </div>
-
-      <div style={{ marginBottom: 16 }}>
-        <Card title="Umbrella groups" right={
-          <span style={{ display: "flex", gap: 8 }}>
-            <input placeholder="New umbrella name…" value={umbName} onChange={(e) => setUmbName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addUmbrella()} style={{ ...inputS, width: 180 }} />
-            <Btn tone="ghost" small onClick={addUmbrella}>+ Create</Btn>
-          </span>
-        }>
-          <div style={{ color: C.mute, fontSize: 12.5, marginBottom: 10 }}>Group super agents under one name — they settle as a single line and get one combined report. Each SA keeps its own tipback rate.</div>
-          {cfg.umbrellas.length === 0 && <div style={{ color: C.mute, fontSize: 13 }}>No umbrellas yet.</div>}
-          {cfg.umbrellas.map((u) => (
-            <div key={u.id} style={{ borderTop: `1px solid ${C.line}`, padding: "10px 0" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-                <input value={u.name} onChange={(e) => up({ umbrellas: cfg.umbrellas.map((x) => x.id === u.id ? { ...x, name: e.target.value } : x) })} style={{ ...inputS, fontWeight: 700, width: 200 }} />
-                <Pill tone="blue">{u.saIds.length} SAs</Pill>
-                <button onClick={() => up({ umbrellas: cfg.umbrellas.filter((x) => x.id !== u.id) })} style={{ marginLeft: "auto", border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 15 }}>× delete</button>
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {saOptions.map((o) => {
-                  const inThis = u.saIds.includes(o.id);
-                  const inOther = !inThis && cfg.umbrellas.some((x) => x.id !== u.id && x.saIds.includes(o.id));
-                  return (
-                    <button key={o.id} onClick={() => !inOther && toggleSAinUmb(u.id, o.id)} style={{
-                      padding: "4px 12px", borderRadius: 14, fontSize: 12, fontWeight: 600, cursor: inOther ? "default" : "pointer",
-                      border: `1px solid ${inThis ? C.goldDark : C.line}`,
-                      background: inThis ? C.gold : C.surface, color: inThis ? "var(--onGold)" : inOther ? "var(--chipOff)" : C.mute, opacity: inOther ? 0.6 : 1 }}>
-                      {o.name}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-        </Card>
-      </div>
-
-      <div style={{ marginBottom: 16 }}>
-        <Card title="Mid-week deal changes (this week only)" right={
-          <span style={{ display: "flex", gap: 8 }}>
-            <select value={adjTarget} onChange={(e) => setAdjTarget(e.target.value)} style={{ ...inputS, fontSize: 12, maxWidth: 220 }}>
-              <option value="">Pick a deal…</option>
-              {adjTargets.filter((t) => !weekAdj[t.key]).map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
-            </select>
-            <Btn tone="ghost" small onClick={addAdj}>+ Add change</Btn>
-          </span>
-        }>
-          <div style={{ color: C.mute, fontSize: 12.5, marginBottom: 10 }}>
-            For the rare case a deal changes partway through the week: the first $X of their tips settles at the old rate, the rest at the new rate. These clear automatically when you upload the next week's file.
-          </div>
-          {Object.keys(weekAdj).length === 0 && <div style={{ color: C.mute, fontSize: 13 }}>None this week.</div>}
-          {Object.entries(weekAdj).map(([key, a]) => {
-            const t = adjTargets.find((x) => x.key === key);
-            const tipback = Math.min(a.amtA, t?.fee || 0) * a.rateA / 100 + Math.max(0, (t?.fee || 0) - a.amtA) * a.rateB / 100;
-            return (
-              <div key={key} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", borderTop: `1px solid ${C.line}`, padding: "10px 0", fontSize: 13 }}>
-                <b style={{ minWidth: 140 }}>{t?.label || key}</b>
-                <span style={{ color: C.mute }}>first</span>
-                <NumInput width={90} value={a.amtA} onChange={(v) => setAdjField(key, { amtA: v })} />
-                <span style={{ color: C.mute }}>of tips @</span>
-                <PctInput width={50} value={a.rateA} onChange={(v) => v != null && setAdjField(key, { rateA: v })} />
-                <span style={{ color: C.mute }}>· remaining {t ? fmt(Math.max(0, t.fee - a.amtA)) : "—"} @</span>
-                <PctInput width={50} value={a.rateB} onChange={(v) => v != null && setAdjField(key, { rateB: v })} />
-                <span style={{ marginLeft: "auto", fontWeight: 700 }}>tipback → {fmt(tipback)}</span>
-                <button onClick={() => removeAdj(key)} style={{ border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 15 }}>×</button>
-              </div>
-            );
-          })}
-        </Card>
-      </div>
-
-      <div style={{ marginBottom: 16 }}>
-        <Card title="Action buys on players (tax wins / rebate losses)" right={
-          <span style={{ display: "flex", gap: 8 }}>
-            <select value={taxTarget} onChange={(e) => setTaxTarget(e.target.value)} style={{ ...inputS, fontSize: 12, maxWidth: 220 }}>
-              <option value="">Pick a player…</option>
-              {taxTargets.filter((t) => !(cfg.actionTax || {})[t.memberId]).map((t) => <option key={t.memberId} value={t.memberId}>{t.name}{t.saName !== "-" ? ` (${t.saName})` : ""}</option>)}
-            </select>
-            <Btn tone="ghost" small onClick={addTax}>+ Add</Btn>
-          </span>
-        }>
-          <div style={{ color: C.mute, fontSize: 12.5, marginBottom: 10 }}>
-            The set % applies to the player's net after rakeback (P&L + tipback): the house takes that % when the net is positive and gives back the same % when it's negative. The house's cut lands on the chosen book in Ak / Jon.
-          </div>
-          {Object.keys(cfg.actionTax || {}).length === 0 && <div style={{ color: C.mute, fontSize: 13 }}>None yet.</div>}
-          {Object.entries(cfg.actionTax || {}).map(([mid, a]) => {
-            const t = taxTargets.find((x) => x.memberId === mid);
-            const nm = t?.name || cfg.names[mid] || mid;
-            const cut = t ? ((t.pnl + t.tipback) * a.pct) / 100 : null;
-            return (
-              <div key={mid} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", borderTop: `1px solid ${C.line}`, padding: "9px 0", fontSize: 13 }}>
-                <b style={{ minWidth: 130 }}>{nm}</b>
-                {!t && <Pill tone="gold">no play this week</Pill>}
-                <span style={{ color: C.mute }}>house %</span>
-                <PctInput width={50} value={a.pct} onChange={(v) => v != null && up({ actionTax: { ...cfg.actionTax, [mid]: { ...a, pct: v } } })} />
-                <span style={{ color: C.mute }}>book</span>
-                <select value={a.backer || "split"} onChange={(e) => up({ actionTax: { ...cfg.actionTax, [mid]: { ...a, backer: e.target.value } } })} style={{ ...inputS, padding: "4px 6px", fontSize: 12 }}>
-                  <option value="split">Ak & Jon 50/50</option><option value="ak">Ak</option><option value="jon">Jon</option>
-                </select>
-                {t && <span style={{ marginLeft: "auto" }}>net {money(t.pnl + t.tipback)} → house cut {money(cut)}</span>}
-                <button onClick={() => { const at = { ...cfg.actionTax }; delete at[mid]; up({ actionTax: at }); }} style={{ border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 15 }}>×</button>
-              </div>
-            );
-          })}
-        </Card>
-      </div>
-
-      <div style={{ background: C.card, borderRadius: 10, padding: "16px 20px", boxShadow: "0 1px 5px rgba(0,0,0,0.15)", marginBottom: 16 }}>
-        <div style={{ fontFamily: "Georgia, serif", fontSize: 16, marginBottom: 4 }}>Super agent deals</div>
-        <div style={{ color: C.mute, fontSize: 12.5, marginBottom: 12 }}>The rate applies to every player under the super agent. Expand to override a specific player.</div>
-        {allSAs.map((e) => {
-          const isNew = !cfg.confirmedSAs[e.id];
-          const open = showAllSA[e.id];
-          const umb = cfg.umbrellas.find((u) => u.saIds.includes(e.id));
-          return (
-            <div key={e.id} style={{ borderTop: `1px solid ${C.line}`, padding: "10px 0" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <span style={{ fontWeight: 700, fontSize: 14 }}>{e.name}</span>
-                {umb && <Pill tone="blue">{umb.name}</Pill>}
-                <span style={{ color: C.mute, fontSize: 12 }}>{e.members.length} player{e.members.length !== 1 ? "s" : ""} · tips {fmt(e.fee)}</span>
-                {newBadge(isNew)}
-                <span style={{ marginLeft: "auto" }}>
-                  <PctInput max={999} value={cfg.saDeals[e.id] ?? cfg.defaultTB} onChange={(v) => setSA(e.id, v ?? cfg.defaultTB)} />
-                </span>
-                <button onClick={() => setShowAllSA({ ...showAllSA, [e.id]: !open })} style={{ border: "none", background: "none", color: C.goldDark, cursor: "pointer", fontSize: 12.5, fontWeight: 700 }}>
-                  {open ? "hide players" : "player overrides"}
-                </button>
-              </div>
-              {open && (
-                <div style={{ marginTop: 8, marginLeft: 10, display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 6 }}>
-                  {e.members.map((mm) => (
-                    <div key={mm.memberId} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, background: C.rowAlt, borderRadius: 6, padding: "5px 10px" }}>
-                      <span>{mm.name}</span>
-                      <span style={{ marginLeft: "auto" }}>
-                        <PctInput width={50} max={999} value={cfg.playerDeals[mm.memberId] ?? ""} onChange={(v) => setPlayer(mm.memberId, v, false)} />
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      <div style={{ background: C.card, borderRadius: 10, padding: "16px 20px", boxShadow: "0 1px 5px rgba(0,0,0,0.15)" }}>
-        <div style={{ fontFamily: "Georgia, serif", fontSize: 16, marginBottom: 4 }}>Individual players (no super agent)</div>
-        <div style={{ color: C.mute, fontSize: 12.5, marginBottom: 12 }}>Settled one by one; each has their own tipback deal. House-backed players are managed on their own tab.</div>
-        {inds.map((e) => (
-          <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 10, borderTop: `1px solid ${C.line}`, padding: "9px 0" }}>
-            <span style={{ fontWeight: 700, fontSize: 14 }}>{e.name}</span>
-            <span style={{ color: C.mute, fontSize: 12 }}>{e.id} · tips {fmt(e.fee)}</span>
-            {newBadge(!cfg.confirmedPlayers[e.id])}
-            <span style={{ marginLeft: "auto" }}>
-              <PctInput max={999} value={cfg.playerDeals[e.id] ?? cfg.defaultTB} onChange={(v) => setPlayer(e.id, v ?? cfg.defaultTB, true)} />
-            </span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 
 // ———— Cross-module helpers ————
-async function loadFishTankModel() {
-  try {
-    const [c, d] = await Promise.all([store.get("fishtank-config-v4"), store.get("fishtank-lastweek-v4")]);
-    if (!d?.value) return null;
-    const wkData = JSON.parse(d.value);
-    if (!wkData.players?.length) return null;
-    const saved = c?.value ? JSON.parse(c.value) : {};
-    const ftCfg = { ...DEFAULT_CONFIG, ...saved,
-      ownAccounts: saved.ownAccounts || DEFAULT_CONFIG.ownAccounts,
-      fees: saved.fees || DEFAULT_CONFIG.fees,
-      backed: saved.backed || DEFAULT_CONFIG.backed,
-      umbrellas: saved.umbrellas || DEFAULT_CONFIG.umbrellas };
-    return { model: buildModel(wkData.players, ftCfg, wkData.weekAdj || {}, wkData.period || ""), period: wkData.period || "", cfg: ftCfg };
-  } catch (e) { return null; }
-}
+// Fish Tank now runs as an ordinary club (see FT_CLUB); the old standalone model is retired.
+async function loadFishTankModel() { return null; }
 // rows for a set of usernames out of the fish tank week (ext + backed players)
 function ftRowsForNames(ft, nameSet) {
   if (!ft) return [];
@@ -2705,14 +1897,50 @@ const AA_WEEK_KEY = "allamerican-lastweek-v1";
 const OC_LIST_KEY = "ownerclubs-v1";
 const OC_LEGACY_CLUB = { id: "allamerican", name: "All American", cfgKey: AA_CFG_KEY, weekKey: AA_WEEK_KEY, meId: "akfish",
   owners: [{ id: "akfish", label: "AkFish", poolPct: 50, jpPct: 33.34 }, { id: "laye", label: "Laye", poolPct: 50, jpPct: 33.33 }, { id: "leaderzay", label: "LeaderZay", poolPct: 0, jpPct: 33.33 }] };
+// Fish Tank used to run on its own engine; it's now an ordinary club (Ak/Jon 50/50, fees, stake rake to pool).
+const FT_CLUB = { id: "fishtank", name: "Fish Tank", cfgKey: "fishtank-club-v1", weekKey: "fishtank-club-week-v1", meId: "ak",
+  owners: [{ id: "ak", label: "Ak", poolPct: 50, jpPct: 50 }, { id: "jon", label: "Jon", poolPct: 50, jpPct: 50 }] };
+// Old Fish Tank config/week → owner-club config/week. The old keys are left untouched.
+function ftToClub(f, wk) {
+  const collectors = {};
+  Object.entries(f.assignments || {}).forEach(([k, v]) => { collectors[k.startsWith("u:") ? "dl:" + k.slice(2) : k] = v; });
+  // The club engine rolls agent-only players (no SA) up to their agent line; carry the collector over.
+  (wk?.players || []).forEach((p) => {
+    if (p.saId === "-" && p.agentId !== "-" && collectors[`p:${p.memberId}`] && !collectors[`ag:${p.agentId}`]) collectors[`ag:${p.agentId}`] = collectors[`p:${p.memberId}`];
+  });
+  const cfg = { ...AA_DEFAULT_CFG,
+    defaultTB: f.defaultTB ?? 80, deals: { ...(f.saDeals || {}) }, ownDeals: { ...(f.playerDeals || {}) },
+    playerTr: Object.fromEntries(Object.entries(f.actionTax || {}).map(([k, v]) => [k, v.pct || 0])),
+    collectors, backed: { ...(f.backed || {}) }, ownAccounts: { ak: f.ownAccounts?.ak || [], jon: f.ownAccounts?.jon || [] },
+    finalizedPeriods: { ...(f.finalizedPeriods || {}) }, names: { ...(f.names || {}) },
+    dlUmbrellas: (f.umbrellas || []).map((u) => ({ id: u.id, name: u.name, memberKeys: (u.saIds || []).map((id) => `sa:${id}`) })),
+    fees: f.fees || [], feeBase: f.feeBase || "net", defaultClass: "agent", stakeMarginToPool: true };
+  const week = wk ? { players: wk.players || null, period: wk.period || "", jackpotFromExport: null } : null;
+  return { cfg, week };
+}
 async function loadOwnerClubs() {
+  let clubs = null;
   try {
     const c = await store.get(OC_LIST_KEY);
-    if (c?.value) { const v = JSON.parse(c.value); if (Array.isArray(v.clubs)) return v.clubs; }
+    if (c?.value) { const v = JSON.parse(c.value); if (Array.isArray(v.clubs)) clubs = v.clubs; }
   } catch (e) {}
   // First run: seed from the legacy All American keys (present or not — it's the default club).
-  const clubs = [OC_LEGACY_CLUB];
-  try { await store.set(OC_LIST_KEY, JSON.stringify({ clubs })); } catch (e) {}
+  let dirty = false;
+  if (!clubs) { clubs = [OC_LEGACY_CLUB]; dirty = true; }
+  // One-time: move Fish Tank onto the shared club engine.
+  if (!clubs.some((c) => c.id === FT_CLUB.id)) {
+    try {
+      const fc = await store.get("fishtank-config-v4");
+      if (fc?.value) {
+        const fw = await store.get("fishtank-lastweek-v4");
+        const { cfg, week } = ftToClub(JSON.parse(fc.value), fw?.value ? JSON.parse(fw.value) : null);
+        await store.set(FT_CLUB.cfgKey, JSON.stringify(cfg));
+        if (week) await store.set(FT_CLUB.weekKey, JSON.stringify(week));
+        clubs = [FT_CLUB, ...clubs]; dirty = true;
+      }
+    } catch (e) {}
+  }
+  if (dirty) { try { await store.set(OC_LIST_KEY, JSON.stringify({ clubs })); } catch (e) {} }
   return clubs;
 }
 async function saveOwnerClubs(clubs) { try { await store.set(OC_LIST_KEY, JSON.stringify({ clubs })); } catch (e) {} }
@@ -2881,7 +2109,7 @@ function buildAAModel(players, cfg, period, club) {
       // that owner, so default straight to them instead of making Ak click
       // through every single line by hand.
       const soleOwner = (club?.owners || []).length === 1 ? club.owners[0].id : null;
-      const tag = (cfg.owners || {})[e.key] || (e.type === "sa" || e.type === "agent" || e.type === "dlUmbrella" ? "agent" : soleOwner);
+      const tag = (cfg.owners || {})[e.key] || (e.type === "sa" || e.type === "agent" || e.type === "dlUmbrella" ? "agent" : cfg.defaultClass || soleOwner);
       // TR: a straight cut of this line's net (P&L + rakeback), on top of the
       // ordinary rake margin below — e.g. a "70/10" deal (70% TB, 10% TR).
       // Defaults to 0 (a no-op, same as before TR existed) unless the club
@@ -2958,11 +2186,23 @@ function buildAAModel(players, cfg, period, club) {
   // The pool is ONLY the agent-line margins, split by each owner's pool %.
   // Stake/action players belong to their backer: the rake margin on those
   // lines goes to that owner personally (split backer → by pool %), never into the pool.
-  const pool = entities.filter((e) => e.tag === "agent").reduce((a, e) => a + e.margin, 0);
+  // Stake rake margin goes to the backer by default, or into the pool when the club says so (Fish Tank).
+  const stakeToPool = !!cfg.stakeMarginToPool;
+  const stakePoolMargin = stakeToPool ? backedEntities.reduce((a, e) => a + e.margin, 0) : 0;
+  const grossPool = entities.filter((e) => e.tag === "agent").reduce((a, e) => a + e.margin, 0) + stakePoolMargin;
+  const poolTR = entities.filter((e) => e.tag === "agent").reduce((a, e) => a + e.trCut, 0);
   const personalMargin = zero();
   entities.forEach((e) => { if (e.tag && e.tag !== "agent" && personalMargin[e.tag] != null) personalMargin[e.tag] += e.margin; });
   const dealMargin = zero();
-  backedEntities.forEach((e) => ownerIds.forEach((o) => (dealMargin[o] += e.margin * shareOf(e.backer, o))));
+  if (!stakeToPool) backedEntities.forEach((e) => ownerIds.forEach((o) => (dealMargin[o] += e.margin * shareOf(e.backer, o))));
+  // Club fees (accountant etc.) come off the pool's rake profit (TR excluded) before it's split.
+  const allFee = entities.reduce((a, e) => a + e.fee, 0) + backedEntities.reduce((a, e) => a + e.fee, 0) + ownRows.reduce((a, p) => a + p.fee, 0);
+  const feeBase = cfg.feeBase === "gross" ? allFee : grossPool - poolTR;
+  const feeRows = (cfg.fees || []).map((f) => ({ ...f, amount: f.kind === "fixed" ? (+f.amount || 0) : (feeBase * (+f.pct || 0)) / 100 }));
+  const totalFees = feeRows.reduce((a, f) => a + f.amount, 0);
+  const pool = grossPool - totalFees;
+  const feeToOwner = zero();
+  feeRows.forEach((f) => { if (feeToOwner[f.recipient] != null) feeToOwner[f.recipient] += f.amount; });
   const jackpot = +((cfg.jackpots || {})[period] ?? 0) || 0;
   const jpSharesRaw = Object.fromEntries(ownerIds.map((o) => [o, jackpot * H.jpShareOf(o)]));
   // BBJ holds: an owner who isn't ready to collect their jackpot share yet
@@ -2985,7 +2225,7 @@ function buildAAModel(players, cfg, period, club) {
   // from players' P&L, so the line collectors are holding it — the shares
   // belong in the settle-up. Tell-tale: books off by exactly the jackpot.
   const jpInCollections = ((cfg.jpModes || {})[period] || "pool") === "collections";
-  const profit = Object.fromEntries(ownerIds.map((o) => [o, poolShares[o] + personalMargin[o] + dealMargin[o] + ownPosition[o] + jpShares[o]]));
+  const profit = Object.fromEntries(ownerIds.map((o) => [o, poolShares[o] + personalMargin[o] + dealMargin[o] + ownPosition[o] + jpShares[o] + feeToOwner[o]]));
 
   // ——— Collections (actuals) ———
   // The jackpot cash sits in the jackpot pool (held by no one), so the
@@ -2995,6 +2235,8 @@ function buildAAModel(players, cfg, period, club) {
   const actual = zero();
   entities.forEach((e) => { if (e.collector && actual[e.collector] != null) actual[e.collector] += e.unionCash; });
   backedEntities.forEach((e) => ownerIds.forEach((o) => (actual[o] += e.unionCash * shareOf(e.backer, o))));
+  // External fees are cash paid out of collections by whoever pays them.
+  feeRows.forEach((f) => { if (f.recipient !== "external") return; ownerIds.forEach((o) => (actual[o] -= f.paidBy === "split" ? f.amount * H.poolShare(o) : f.paidBy === o ? f.amount : 0)); });
 
   const cashProfit = Object.fromEntries(ownerIds.map((o) => [o, profit[o] - (jpInCollections ? 0 : jpShares[o])]));
   const delta = Object.fromEntries(ownerIds.map((o) => [o, actual[o] - cashProfit[o]]));
@@ -3018,7 +2260,7 @@ function buildAAModel(players, cfg, period, club) {
   const jpShare = ownerIds.length ? jackpot / ownerIds.length : 0;
 
   return { entities, backedEntities, own, ownPosition, untagged, uncollected, ready, H, ownerIds, dlAssignable,
-    pool, poolShares, personalMargin, dealMargin, totalPersonalMargin, totalDealMargin, jackpot, jpShare, jpShares, jpSharesRaw, jpHoldMoves, jpInCollections, profit, cashProfit, actual, delta, transfers, imbalance, balanceOk,
+    pool, grossPool, feeRows, totalFees, feeToOwner, poolShares, personalMargin, dealMargin, totalPersonalMargin, totalDealMargin, jackpot, jpShare, jpShares, jpSharesRaw, jpHoldMoves, jpInCollections, profit, cashProfit, actual, delta, transfers, imbalance, balanceOk,
     backedBook, clubRevenue, agentRB, personalRB, backedRB, ownFeeback };
 }
 
@@ -3350,9 +2592,6 @@ function AAOwnAccounts({ model, cfg, up }) {
   return (
     <div style={{ marginTop: 18 }}>
       <Card title="Own accounts — the owners' personal play" right={<Pill tone="gold">P&L logged to owner · full feeback</Pill>}>
-        <div style={{ fontSize: 12.5, color: C.mute, marginBottom: 10 }}>
-          List each owner's own usernames (comma-separated, exact nicknames). Their play is pulled off the lines above and logged straight into that owner's profit as P&L + 100% feeback — the union doesn't profit off an owner's own play, and the position settles through the weekly transfer like everything else.
-        </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
           {ownerIds.map((o) => (
             <div key={o}>
@@ -3448,45 +2687,34 @@ function AABackedTab({ model, cfg, up, period }) {
             : <Btn tone="gold" small disabled={!period} onClick={lockWeek}>Lock week — roll makeup forward</Btn>}
         </div>
       </div>
-      <div style={{ color: C.mute, fontSize: 12.5, marginBottom: 16 }}>
-        Matched by exact username — a staked player inside an agent tree is pulled out of the tree onto their deal automatically.
-        {" "}<b>Stake (makeup)</b>: week net = P&L + RB credit; above makeup the player is paid their % of the excess, below it the net accrues to makeup. RB rate follows makeup <b>entering</b> the week; Lock once to roll it forward. Unlock to fix something, then lock again to re-snapshot — if this week's already in Tabs, re-sync it from Tabs → Bookkeeping afterward.
-        {" "}<b>Action buy</b>: the backer owns their % of (P&L + rakeback); the player settles the remainder.
-        {" "}The rake margin on these lines goes to the <b>backer personally</b> (never the pool), and the deal P&L below is <b>between backer and player only</b> — it never enters the owner settle-up.
-        {" "}Paste a Tabs → Staking makeup deal's ID into <b>Unified deal</b> on a row to fold that player's weekly net into one shared, ongoing pool across sites (and manual/external games) instead of tracking makeup locally here — the local balance freezes and the deal's own % staked / chop handle the tab. Use a "settle per session" deal (the default) so this week's report and any mid-week manual results each update the running makeup as they're logged, in the order they happened, rather than getting batched into one lump sum.
-      </div>
 
       <div style={{ fontSize: 13, fontWeight: 700, color: C.goldDark, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>Stake deals (makeup)</div>
-      <div style={{ background: C.card, borderRadius: 10, overflow: "auto", boxShadow: "0 1px 6px rgba(0,0,0,0.15)", marginBottom: 20 }}>
+      <div className="fit" style={{ background: C.card, borderRadius: 10, overflow: "auto", boxShadow: "0 1px 6px rgba(0,0,0,0.15)", marginBottom: 20 }}>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead><tr style={{ background: C.cream }}>
             <th style={{ ...th, textAlign: "left" }}>Player</th><th style={{ ...th, textAlign: "left" }}>Backer</th>
-            <th style={th}>Makeup entering</th><th style={{ ...th, textAlign: "center" }}>Status</th>
-            <th style={th}>RB % normal</th><th style={th}>RB % makeup</th><th style={th}>Player profit %</th>
-            <th style={th}>Tips</th><th style={th}>P&L</th><th style={th}>RB credit</th><th style={th}>Net</th><th style={th}>Player gets</th><th style={th}>Backer book</th><th style={th}>Makeup after</th><th style={th}>Unified deal</th><th style={th}></th>
+            <th style={th}>Makeup in</th>
+            <th style={th}>RB % normal / in makeup</th><th style={th}>Player %</th>
+            <th style={th}>P&L</th><th style={th}>Net (P&L+RB)</th><th style={th}>Player gets</th><th style={th}>Backer book</th><th style={th}>Makeup after</th><th style={th}>Unified</th><th style={th}></th>
           </tr></thead>
           <tbody>
-            {stakePlayers.length === 0 && <tr><td colSpan={16} style={{ ...tdL, color: C.mute, padding: 14 }}>No stake deals yet — add one below.</td></tr>}
+            {stakePlayers.length === 0 && <tr><td colSpan={12} style={{ ...tdL, color: C.mute, padding: 14 }}>No stake deals yet — add one below.</td></tr>}
             {stakePlayers.map(([k, b], i) => {
               const e = findE(k);
               return (
                 <tr key={k} style={{ background: i % 2 ? C.rowAlt : C.card, borderTop: `1px solid ${C.line}` }}>
                   <td style={{ ...tdL, fontWeight: 600 }}>{b.name}{!e && <span style={{ marginLeft: 8 }}><Pill tone="gold">no play</Pill></span>}</td>
                   <td style={tdL}>{backerSel(k, b)}</td>
-                  <td style={td}><NumInput width={85} value={b.makeup} onChange={(v) => setB(k, { makeup: v })} /></td>
-                  <td style={{ ...td, textAlign: "center" }}>{(b.makeup || 0) > 0.005 ? <Pill tone="red">in makeup</Pill> : <Pill tone="green">clear</Pill>}</td>
-                  <td style={td}><PctInput width={46} max={999} value={b.rbNormal} onChange={(v) => v != null && setB(k, { rbNormal: v })} /></td>
-                  <td style={td}><PctInput width={46} max={999} value={b.rbMakeup} onChange={(v) => v != null && setB(k, { rbMakeup: v })} /></td>
+                  <td style={{ ...td, color: (b.makeup || 0) > 0.005 ? C.red : C.ink }}><NumInput width={80} value={b.makeup} onChange={(v) => setB(k, { makeup: v })} /></td>
+                  <td style={td}><span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}><PctInput width={44} max={999} value={b.rbNormal} onChange={(v) => v != null && setB(k, { rbNormal: v })} /><PctInput width={44} max={999} value={b.rbMakeup} onChange={(v) => v != null && setB(k, { rbMakeup: v })} /></span></td>
                   <td style={td}><PctInput width={46} value={b.playerProfitPct ?? 50} onChange={(v) => v != null && setB(k, { playerProfitPct: v })} /></td>
-                  <td style={td}>{e ? fmt(e.fee) : "—"}</td>
                   <td style={td}>{e ? money(e.pnl) : "—"}</td>
-                  <td style={td}>{e ? <>{fmt(e.rbCredit)} <span style={{ color: C.mute, fontSize: 11 }}>@{e.rb}%</span></> : "—"}</td>
-                  <td style={td}>{e ? money(e.net) : "—"}</td>
+                  <td style={td} title={e ? `RB ${fmt(e.rbCredit)} @${e.rb}% on ${fmt(e.fee)} tips` : ""}>{e ? money(e.net) : "—"}</td>
                   <td style={td}>{e ? <b>{fmt(e.settlement)}</b> : "—"}</td>
                   <td style={td}>{e ? money(e.backerBook) : "—"}</td>
                   <td style={td}>{e ? fmt(e.makeupAfter) : fmt(b.makeup || 0)}</td>
                   <td style={td}>
-                    <input placeholder="deal id" value={b.unifiedDealId || ""} onChange={(ev) => setB(k, { unifiedDealId: ev.target.value.trim() })} style={{ ...inputS, width: 88, fontSize: 11 }} title="Paste a Tabs → Staking makeup deal's ID to fold this player's weekly net into that shared, ongoing pool instead of tracking makeup locally here. Use a 'settle per session' deal so it updates alongside any mid-week manual results in the order they happened." />
+                    <input placeholder="deal id" value={b.unifiedDealId || ""} onChange={(ev) => setB(k, { unifiedDealId: ev.target.value.trim() })} style={{ ...inputS, width: 70, fontSize: 11 }} title="Paste a Tabs → Staking makeup deal's ID to fold this player's weekly net into that shared, ongoing pool instead of tracking makeup locally here. Use a 'settle per session' deal so it updates alongside any mid-week manual results in the order they happened." />
                     {b.unifiedDealId && <div style={{ fontSize: 9.5, color: C.goldDark, fontWeight: 700, marginTop: 2 }}>UNIFIED</div>}
                   </td>
                   <td style={td}><button onClick={() => removeB(k)} style={{ border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 15 }}>×</button></td>
@@ -3498,7 +2726,7 @@ function AABackedTab({ model, cfg, up, period }) {
       </div>
 
       <div style={{ fontSize: 13, fontWeight: 700, color: C.goldDark, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>Action buys</div>
-      <div style={{ background: C.card, borderRadius: 10, overflow: "auto", boxShadow: "0 1px 6px rgba(0,0,0,0.15)", marginBottom: 20 }}>
+      <div className="fit" style={{ background: C.card, borderRadius: 10, overflow: "auto", boxShadow: "0 1px 6px rgba(0,0,0,0.15)", marginBottom: 20 }}>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead><tr style={{ background: C.cream }}>
             <th style={{ ...th, textAlign: "left" }}>Player</th><th style={{ ...th, textAlign: "left" }}>Backer</th>
@@ -3539,6 +2767,11 @@ function AABackedTab({ model, cfg, up, period }) {
           <div style={{ color: C.mute, fontSize: 12, marginTop: 2 }}>Rake margins → backer (in profit, not the books above): {ownerIds.map((o, i) => <span key={o}>{i ? " · " : ""}{lbl(o)} <b>{money(model.dealMargin[o])}</b></span>)}</div>
         </div>
       </div>
+      <Notes><div>Matched by exact username — a staked player inside an agent tree is pulled out of the tree onto their deal automatically.
+        {" "}<b>Stake (makeup)</b>: week net = P&L + RB credit; above makeup the player is paid their % of the excess, below it the net accrues to makeup. RB rate follows makeup <b>entering</b> the week; Lock once to roll it forward. Unlock to fix something, then lock again to re-snapshot — if this week's already in Tabs, re-sync it from Tabs → Bookkeeping afterward.
+        {" "}<b>Action buy</b>: the backer owns their % of (P&L + rakeback); the player settles the remainder.
+        {" "}The rake margin on these lines goes to the <b>backer personally</b> (never the pool), and the deal P&L below is <b>between backer and player only</b> — it never enters the owner settle-up.
+        {" "}Paste a Tabs → Staking makeup deal's ID into <b>Unified deal</b> on a row to fold that player's weekly net into one shared, ongoing pool across sites (and manual/external games) instead of tracking makeup locally here — the local balance freezes and the deal's own % staked / chop handle the tab. Use a "settle per session" deal (the default) so this week's report and any mid-week manual results each update the running makeup as they're logged, in the order they happened, rather than getting batched into one lump sum.</div></Notes>
     </div>
   );
 }
@@ -3764,7 +2997,7 @@ function AAReportsTab({ model, cfg, period, expanded, setExpanded, club }) {
       <ExportModal data={exportData} onClose={() => setExportData(null)} />
       <div style={{ fontFamily: "Georgia, serif", fontSize: 19, marginBottom: 4 }}>Reports</div>
       <div style={{ color: C.mute, fontSize: 12.5, marginBottom: 14 }}>
-        Click a row to expand; Excel downloads a styled workbook to send. Owner reports show only that owner's world — his own play, his personal players, and the shared agents — never another owner's personal players.
+        Click a row to expand. Owner reports show only that owner's own play, personal players, and shared agents.
       </div>
 
       <div style={{ fontSize: 12, fontWeight: 700, color: C.goldDark, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>Owners</div>
@@ -3782,7 +3015,7 @@ function AAReportsTab({ model, cfg, period, expanded, setExpanded, club }) {
 
 
 // ——— Owner club setup: name, owners (label · pool % · JP %), which owner is you, delete club ———
-function OwnerClubSetup({ club, clubs, saveClubs, onDeleteClub }) {
+function OwnerClubSetup({ club, clubs, saveClubs, onDeleteClub, cfg, up }) {
   const [name, setName] = useState(club.name);
   useEffect(() => setName(club.name), [club.id, club.name]);
   const patch = (p) => saveClubs(clubs.map((c) => (c.id === club.id ? { ...c, ...p } : c)));
@@ -3792,12 +3025,11 @@ function OwnerClubSetup({ club, clubs, saveClubs, onDeleteClub }) {
   const H = ocHelpers(club);
   return (
     <div style={{ marginTop: 6 }}>
-      <Card title="Club" right={<Pill tone="gold">owner club</Pill>}>
+      <Card title="Club">
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <span style={{ fontSize: 13, color: C.mute }}>Name</span>
           <input value={name} onChange={(e) => setName(e.target.value)} onBlur={() => name.trim() && name.trim() !== club.name && patch({ name: name.trim() })}
             onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()} style={{ ...inputS, width: 220, fontWeight: 700 }} />
-          <span style={{ fontSize: 12, color: C.mute }}>Same weekly export format as All American. Deals, tags, and makeup live with this club only.</span>
           <span style={{ marginLeft: "auto" }}>
             <Btn tone="ghost" small onClick={() => { if (window.confirm(`Delete club "${club.name}" and all its saved weeks, deals, and tags? Archived files stay in Archive.`)) onDeleteClub(club.id); }}>Delete club</Btn>
           </span>
@@ -3805,9 +3037,7 @@ function OwnerClubSetup({ club, clubs, saveClubs, onDeleteClub }) {
       </Card>
       <div style={{ height: 14 }} />
       <Card title="Owners" right={<Btn tone="ghost" small onClick={addOwner}>+ Owner</Btn>}>
-        <div style={{ fontSize: 12.5, color: C.mute, marginBottom: 10 }}>
-          <b>Pool %</b> — how the agent-line margin pool splits (0 = not in the pool; shares are normalized, so 50/50/0 and 1/1/0 mean the same). <b>JP %</b> — how the bad beat contribution splits. <b>Me</b> marks your own seat: your share of stake/action books feeds Tabs → Staking. Owners can be just you.
-        </div>
+        <div style={{ fontSize: 12.5, color: C.mute, marginBottom: 10 }}><b>Pool %</b> splits the shared pool · <b>JP %</b> splits the bad beat jackpot · <b>Me</b> marks your seat.</div>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead><tr style={{ background: C.cream }}>
             <th style={{ ...th, textAlign: "left" }}>Owner</th><th style={th}>Pool %</th><th style={{ ...th }}>Pool share</th><th style={th}>JP %</th><th style={th}>JP share</th><th style={{ ...th, textAlign: "center" }}>Me</th><th style={th}></th>
@@ -3827,7 +3057,53 @@ function OwnerClubSetup({ club, clubs, saveClubs, onDeleteClub }) {
           </tbody>
         </table>
       </Card>
+      {cfg && up && <><div style={{ height: 14 }} /><ClubRules club={club} cfg={cfg} up={up} /></>}
     </div>
+  );
+}
+
+// Club-wide rules that used to be Fish Tank-only: defaults, fees off the pool, where stake rake goes.
+function ClubRules({ club, cfg, up }) {
+  const H = ocHelpers(club);
+  const fees = cfg.fees || [];
+  const setFee = (id, p) => up({ fees: fees.map((f) => (f.id === id ? { ...f, ...p } : f)) });
+  const row = (label, ctl) => <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0", borderTop: `1px solid ${C.line}`, fontSize: 13 }}><span style={{ color: C.mute }}>{label}</span><span style={{ marginLeft: "auto" }}>{ctl}</span></div>;
+  return (
+    <Card title="Club rules">
+      {row("Default rakeback (TB %) for new lines", <PctInput value={cfg.defaultTB ?? 80} onChange={(v) => v != null && up({ defaultTB: v })} width={60} max={999} />)}
+      {row("Default take rate (TR %)", <PctInput value={cfg.defaultTR ?? 0} onChange={(v) => v != null && up({ defaultTR: v })} width={60} />)}
+      {row("Class for new player/manager lines", <select value={cfg.defaultClass || ""} onChange={(e) => up({ defaultClass: e.target.value || undefined })} style={inputS}>
+        <option value="">Ask me each time</option>{H.tags.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+      </select>)}
+      {row("Rake margin on staked/action players goes to", <select value={cfg.stakeMarginToPool ? "pool" : "backer"} onChange={(e) => up({ stakeMarginToPool: e.target.value === "pool" })} style={inputS}>
+        <option value="backer">The backer</option><option value="pool">The shared pool</option>
+      </select>)}
+      <div style={{ borderTop: `1px solid ${C.line}`, paddingTop: 10, marginTop: 4 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+          <b style={{ fontSize: 13 }}>Fees off the pool</b>
+          <select value={cfg.feeBase || "net"} onChange={(e) => up({ feeBase: e.target.value })} style={{ ...inputS, fontSize: 12 }}>
+            <option value="net">% of pool rake profit</option><option value="gross">% of total rake</option>
+          </select>
+          <span style={{ marginLeft: "auto" }}><Btn tone="ghost" small onClick={() => up({ fees: [...fees, { id: "f" + uid(), label: "New fee", pct: 0, recipient: "external", paidBy: "split" }] })}>+ Fee</Btn></span>
+        </div>
+        {fees.length === 0 && <div style={{ color: C.mute, fontSize: 12.5 }}>No fees.</div>}
+        {fees.map((f) => (
+          <div key={f.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0", flexWrap: "wrap" }}>
+            <input value={f.label} onChange={(e) => setFee(f.id, { label: e.target.value })} style={{ ...inputS, width: 180 }} />
+            <PctInput value={f.pct ?? 0} onChange={(v) => setFee(f.id, { pct: v ?? 0 })} width={54} />
+            <span style={{ fontSize: 12, color: C.mute }}>to</span>
+            <select value={f.recipient} onChange={(e) => setFee(f.id, { recipient: e.target.value })} style={{ ...inputS, fontSize: 12 }}>
+              <option value="external">someone outside</option>{H.owners.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+            </select>
+            {f.recipient === "external" && <><span style={{ fontSize: 12, color: C.mute }}>paid by</span>
+              <select value={f.paidBy || "split"} onChange={(e) => setFee(f.id, { paidBy: e.target.value })} style={{ ...inputS, fontSize: 12 }}>
+                <option value="split">pool split</option>{H.owners.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+              </select></>}
+            <button onClick={() => up({ fees: fees.filter((x) => x.id !== f.id) })} style={{ marginLeft: "auto", border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 15 }}>×</button>
+          </div>
+        ))}
+      </div>
+    </Card>
   );
 }
 
@@ -4035,13 +3311,13 @@ function AADLUmbrellasTab({ model, cfg, up }) {
     ["Masters", assignable.filter((e) => e.type === "master")],
   ].filter(([, list]) => list.length > 0);
 
+  const [editing, setEditing] = useState(null);
   return (
     <div>
-      <div style={{ fontFamily: "Georgia, serif", fontSize: 19, marginBottom: 4 }}>DL umbrellas</div>
-      <div style={{ color: C.mute, fontSize: 12.5, marginBottom: 16 }}>
+      <div style={{ display: "none" }}>
         Some super agents, agents, unlinked players, managers, and masters — including a club owner's own Manager/Master line — are all actually settled through the same person. Group those lines into one DL umbrella and they combine into a single line on Lines & ownership — one class, one collector — while each member keeps its own rate; expand "player overrides" on the merged line to override any subgroup or player underneath.
       </div>
-      <Card title="Umbrella groups" right={
+      <Card title="DL umbrellas — lines settled through one person" right={
         <span style={{ display: "flex", gap: 8 }}>
           <input placeholder="New umbrella name…" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addUmbrella()} style={{ ...inputS, width: 200 }} />
           <Btn tone="ghost" small onClick={addUmbrella}>+ Create</Btn>
@@ -4049,13 +3325,15 @@ function AADLUmbrellasTab({ model, cfg, up }) {
       }>
         {umbrellas.length === 0 && <div style={{ color: C.mute, fontSize: 13 }}>No DL umbrellas yet.</div>}
         {umbrellas.map((u) => (
-          <div key={u.id} style={{ borderTop: `1px solid ${C.line}`, padding: "12px 0" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+          <div key={u.id} style={{ borderTop: `1px solid ${C.line}`, padding: "6px 0" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: editing === u.id ? 10 : 0 }}>
               <input value={u.name} onChange={(e) => renameUmbrella(u.id, e.target.value)} style={{ ...inputS, fontWeight: 700, width: 200 }} />
               <Pill tone="blue">{u.memberKeys.length} member{u.memberKeys.length !== 1 ? "s" : ""}</Pill>
-              <button onClick={() => deleteUmbrella(u.id)} style={{ marginLeft: "auto", border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 15 }}>× delete</button>
+              <span style={{ fontSize: 12, color: C.mute, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 480 }}>{u.memberKeys.map((k) => (assignable.find((o) => o.key === k) || {}).name || cfg.names?.[k.split(":")[1]] || k).join(", ")}</span>
+              <button onClick={() => setEditing(editing === u.id ? null : u.id)} style={{ marginLeft: "auto", border: "none", background: "none", color: C.goldDark, cursor: "pointer", fontSize: 12, fontWeight: 700 }}>{editing === u.id ? "done" : "edit members"}</button>
+              <button onClick={() => deleteUmbrella(u.id)} style={{ border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 15 }}>×</button>
             </div>
-            {groups.map(([label, list]) => (
+            {editing === u.id && groups.map(([label, list]) => (
               <div key={label} style={{ marginBottom: 8 }}>
                 <div style={{ fontSize: 11, color: C.mute, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>{label}</div>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -4074,7 +3352,7 @@ function AADLUmbrellasTab({ model, cfg, up }) {
                 </div>
               </div>
             ))}
-            {groups.length === 0 && <div style={{ color: C.mute, fontSize: 12.5 }}>No super agents, agents, or unlinked players on this week's export yet.</div>}
+            {editing === u.id && groups.length === 0 && <div style={{ color: C.mute, fontSize: 12.5 }}>No super agents, agents, or unlinked players on this week's export yet.</div>}
           </div>
         ))}
       </Card>
@@ -4226,6 +3504,7 @@ function AllAmerican({ club, clubs, saveClubs, onDeleteClub }) {
   const [exportData, setExportData] = useState(null);
   const [repExpanded, setRepExpanded] = useState({});
   const [showMembers, setShowMembers] = useState({});
+  const [showJp, setShowJp] = useState(false);
   const fileRef = useRef(null);
 
   useEffect(() => { (async () => {
@@ -4291,6 +3570,7 @@ function AllAmerican({ club, clubs, saveClubs, onDeleteClub }) {
     </div>
   );
 
+  const nzRow = (label, val, opts) => (Math.abs(val || 0) > 0.005 ? ownerRow(label, val, opts) : null);
   const collectorSel = (e) => (
     <select value={e.collector || ""} onChange={(ev) => setCollector(e.key, ev.target.value)} style={{ ...inputS, padding: "4px 6px", fontSize: 12, borderColor: e.collector ? C.line : C.red }}>
       {!e.collector && <option value="">— who collects? —</option>}
@@ -4299,7 +3579,7 @@ function AllAmerican({ club, clubs, saveClubs, onDeleteClub }) {
   );
 
   return (
-    <div style={{ padding: "20px 26px 60px", maxWidth: 1180, margin: "0 auto" }}>
+    <div style={{ padding: "18px clamp(10px, 2vw, 26px) 60px", maxWidth: 1600, margin: "0 auto" }}>
       <ExportModal data={exportData} onClose={() => setExportData(null)} />
       <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }}
         onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = ""; }} />
@@ -4310,21 +3590,19 @@ function AllAmerican({ club, clubs, saveClubs, onDeleteClub }) {
       {!players && (
         <div style={{ background: C.card, border: `1px dashed ${C.gold}`, borderRadius: 10, padding: "50px 30px", textAlign: "center" }}>
           <div style={{ fontFamily: "Georgia, serif", fontSize: 20, marginBottom: 8 }}>{club.name}</div>
-          <div style={{ color: C.mute, fontSize: 14, marginBottom: 18 }}>
-            Upload the club's weekly .xlsx export. The margin on every line (tips − rakeback) is the profit: agent lines feed the owner pool ({H.poolLabel}), personal lines route 100% to their owner, own accounts log straight into each owner's P&L, and the bad beat contribution is read from the export and split by each owner's JP %. Tags, deals, and makeup balances persist week to week.
-          </div>
+          <div style={{ color: C.mute, fontSize: 14, marginBottom: 18 }}>Upload this week's ClubGG export to start. Set owners and club rules in Setup.</div>
           <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
             <Btn onClick={() => fileRef.current?.click()}>Choose file</Btn>
             <Btn tone="ghost" onClick={() => setTab("setup")}>Owners & setup</Btn>
           </div>
-          {tab === "setup" && <div style={{ textAlign: "left", marginTop: 20 }}><OwnerClubSetup club={club} clubs={clubs} saveClubs={saveClubs} onDeleteClub={onDeleteClub} /></div>}
+          {tab === "setup" && <div style={{ textAlign: "left", marginTop: 20 }}><OwnerClubSetup club={club} clubs={clubs} saveClubs={saveClubs} onDeleteClub={onDeleteClub} cfg={cfg} up={up} /></div>}
         </div>
       )}
 
       {players && model && (
         <>
           <div style={{ display: "flex", gap: 4, marginBottom: 16, borderBottom: `2px solid ${C.line}`, flexWrap: "wrap" }}>
-            {[["settle", "Lines & ownership"], ["dlumbrellas", "DL Umbrellas"], ["backed", "Stake & action"], ["reports", "Reports"], ["owners", "Settlements"], ["setup", "Owners & setup"]].map(([k, label]) => (
+            {[["settle", "Lines & deals"], ["backed", "Stakes & action"], ["reports", "Reports"], ["owners", "Settle-up"], ["setup", "Setup"]].map(([k, label]) => (
               <button key={k} onClick={() => setTab(k)} style={{
                 border: "none", cursor: "pointer", padding: "9px 16px", fontSize: 13.5, fontWeight: 700,
                 background: tab === k ? C.card : "transparent", color: tab === k ? C.ink : C.mute,
@@ -4350,23 +3628,18 @@ function AllAmerican({ club, clubs, saveClubs, onDeleteClub }) {
 
           {tab === "settle" && (
             <>
-              <div style={{ display: "flex", alignItems: "baseline", marginBottom: 10 }}>
-                <div style={{ fontFamily: "Georgia, serif", fontSize: 19 }}>Every line: class, margin routing, and who collects it</div>
+              <div style={{ display: "flex", alignItems: "center", marginBottom: 10, gap: 8, flexWrap: "wrap" }}>
+                <div style={{ fontFamily: "Georgia, serif", fontSize: 18 }}>Lines & deals</div>
+                <span style={{ color: C.mute, fontSize: 12.5 }}>{model.entities.length} lines · set rate, class, and who collects</span>
                 <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
-                  <span style={{ fontSize: 12, color: C.mute }}>Default TR %</span>
-                  <PctInput value={cfg.defaultTR ?? 0} onChange={(v) => v != null && up({ defaultTR: v })} width={50} />
                   <Btn tone="gold" small onClick={() => {
-                    if (!model.ready) { window.alert(`Finish review first — ${model.untagged.length} untagged line(s), ${model.uncollected.length} without a collector. The workbook includes the final settle-up, so everything needs classing.`); return; }
+                    if (!model.ready) { window.alert(`Finish review first — ${model.untagged.length} untagged line(s), ${model.uncollected.length} without a collector.`); return; }
                     downloadAAWorkbook(model, period, club);
-                  }}>Download Excel workbook</Btn>
+                  }}>Download Excel</Btn>
                   <Btn tone="ghost" small onClick={exportCsv}>Copy table</Btn>
                 </div>
               </div>
-              <div style={{ color: C.mute, fontSize: 12.5, marginBottom: 12 }}>
-                <b>Margin</b> = tips − rakeback = the profit on the line, plus any TR cut. The rakeback itself is always paid out to the agent or player at their TB%. <b>TR</b> is an extra cut of that line's net (P&L + rakeback) on top of the rake margin — e.g. a "70/10" deal (70% TB, 10% TR) — off by default; set "Default TR %" above for a club where every line runs on one (skips needing a separate stake per player), or override it per line. <b>Agent</b> margins feed the owner pool ({H.poolLabel}); <b>personal</b> margins go 100% to that owner (his player, his spread), and he collects the line himself. Owners' own accounts are handled below; staked/action players sit on the Stake & action tab. Every player rolls up onto their super agent or, lacking one, their agent — "player overrides" on a line lets you pin one player (or a whole agent) to their own rate, e.g. a VIP deal that shouldn't follow their agent's rate. <b>Managers</b> and <b>Masters</b> sit outside that hierarchy and show up as their own lines.
-              </div>
-
-              <div style={{ background: C.card, borderRadius: 10, overflow: "auto", boxShadow: "0 1px 6px rgba(0,0,0,0.15)" }}>
+              <div className="fit" style={{ background: C.card, borderRadius: 10, boxShadow: "0 1px 6px rgba(0,0,0,0.15)" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead><tr style={{ background: C.cream }}>
                     <th style={{ ...th, textAlign: "left" }}>Line</th>
@@ -4375,8 +3648,8 @@ function AllAmerican({ club, clubs, saveClubs, onDeleteClub }) {
                     <th style={th}>TB %</th>
                     <th style={th}>TR %</th>
                     <th style={th}>Winnings</th><th style={th}>Tips</th>
-                    <th style={th}>Rakeback paid</th>
-                    <th style={{ ...th }}>Margin → to</th><th style={th}>Union cash</th>
+                    <th style={th}>Rakeback</th>
+                    <th style={{ ...th }}>Margin → to</th><th style={th}>Club cash</th>
                   </tr></thead>
                   <tbody>
                     {model.entities.map((e, i) => {
@@ -4390,7 +3663,7 @@ function AllAmerican({ club, clubs, saveClubs, onDeleteClub }) {
                           {treeable && (
                             <button onClick={() => setShowMembers({ ...showMembers, [e.key]: !open })}
                               style={{ marginLeft: 8, border: "none", background: "none", color: C.goldDark, cursor: "pointer", fontSize: 11.5, fontWeight: 700 }}>
-                              {open ? "hide players" : "player overrides"}
+                              {open ? "hide" : "players"}
                             </button>
                           )}
                         </td>
@@ -4403,8 +3676,8 @@ function AllAmerican({ club, clubs, saveClubs, onDeleteClub }) {
                         <td style={{ ...tdL, whiteSpace: "nowrap" }}>
                           {e.tag === "agent" ? collectorSel(e) : e.tag ? <Pill tone="green">{lbl(e.tag)} · auto</Pill> : <span style={{ color: C.mute }}>—</span>}
                         </td>
-                        <td style={td}><PctInput value={cfg.deals[e.id] ?? cfg.defaultTB} onChange={(v) => setDeal(e.id, v)} width={54} max={999} /></td>
-                        <td style={td}><PctInput value={cfg.tr?.[e.id] ?? cfg.defaultTR ?? 0} onChange={(v) => v != null && setTr(e.id, v)} width={54} /></td>
+                        <td style={td}><PctInput value={cfg.deals[e.id] ?? cfg.defaultTB} onChange={(v) => setDeal(e.id, v)} width={46} max={999} /></td>
+                        <td style={td}><PctInput value={cfg.tr?.[e.id] ?? cfg.defaultTR ?? 0} onChange={(v) => v != null && setTr(e.id, v)} width={42} /></td>
                         <td style={td}>{fmt(e.pnl)}</td>
                         <td style={td}>{fmt(e.fee)}</td>
                         <td style={td}>{fmt(e.tipback)}</td>
@@ -4431,6 +3704,7 @@ function AllAmerican({ club, clubs, saveClubs, onDeleteClub }) {
                 <div style={{ background: C.bar, color: "var(--barText)", display: "flex", padding: "12px 16px", fontSize: 13.5, gap: 24, flexWrap: "wrap" }}>
                   <span>Rake <b style={{ color: "var(--barGold)" }}>{fmt(model.clubRevenue)}</b></span>
                   <span>RB paid <b style={{ color: "var(--barGold)" }}>{fmt(model.agentRB + model.personalRB + model.backedRB)}</b></span>
+                  {model.totalFees > 0.005 && <span>Fees <b style={{ color: "var(--barRed)" }}>{fmt(model.totalFees)}</b></span>}
                   <span>Pool <b style={{ color: model.pool >= 0 ? "var(--barGreen)" : "var(--barRed)" }}>{fmt(model.pool)}</b> <span style={{ color: "var(--barSubtle)" }}>→ {H.poolOwners.map((o) => `${o.label} ${fmt(model.poolShares[o.id])}`).join(" · ")}</span></span>
                   <span style={{ marginLeft: "auto" }}>Personal margins — {ownerIds.map((o, i) => <span key={o}>{i ? " · " : ""}{lbl(o)} <b style={{ color: "var(--barGold)" }}>{fmt(model.personalMargin[o])}</b></span>)}</span>
                 </div>
@@ -4445,20 +3719,24 @@ function AllAmerican({ club, clubs, saveClubs, onDeleteClub }) {
                 ))}
               </div>
 
+              <div style={{ height: 14 }} />
+              <AADLUmbrellasTab model={model} cfg={cfg} up={up} />
               <AAOwnAccounts model={model} cfg={cfg} up={up} />
+              <Notes>
+                <div><b>Margin</b> = tips − rakeback = the profit on the line, plus any TR cut. The rakeback itself is always paid out to the agent or player at their TB%. <b>TR</b> is an extra cut of that line's net (P&L + rakeback) on top of the rake margin — e.g. a "70/10" deal (70% TB, 10% TR) — off by default; set "Default TR %" above for a club where every line runs on one (skips needing a separate stake per player), or override it per line. <b>Agent</b> margins feed the owner pool ({H.poolLabel}); <b>personal</b> margins go 100% to that owner (his player, his spread), and he collects the line himself. Owners' own accounts are handled below; staked/action players sit on the Stake & action tab. Every player rolls up onto their super agent or, lacking one, their agent — "player overrides" on a line lets you pin one player (or a whole agent) to their own rate, e.g. a VIP deal that shouldn't follow their agent's rate. <b>Managers</b> and <b>Masters</b> sit outside that hierarchy and show up as their own lines.</div>
+                <div><b>DL umbrellas</b> fold several super agents / agents / players who all settle through one person into a single line. Each member keeps its own rate underneath (open "players" on the merged line).</div>
+                <div><b>Class</b>: agent lines feed the shared pool ({H.poolLabel}); personal lines route 100% to their owner. <b>Collected by</b> is who actually takes the cash for that line.</div>
+              </Notes>
             </>
           )}
-
-          {tab === "dlumbrellas" && <AADLUmbrellasTab model={model} cfg={cfg} up={up} />}
 
           {tab === "backed" && <AABackedTab model={model} cfg={cfg} up={up} period={period} />}
 
           {tab === "reports" && <AAReportsTab model={model} cfg={cfg} period={period} expanded={repExpanded} setExpanded={setRepExpanded} club={club} />}
           {tab === "setup" && (
             <>
-              <OwnerClubSetup club={club} clubs={clubs} saveClubs={saveClubs} onDeleteClub={onDeleteClub} />
-              <div style={{ height: 14 }} />
-              <AABBJHoldsCard model={model} cfg={cfg} up={up} period={period} />
+              <OwnerClubSetup club={club} clubs={clubs} saveClubs={saveClubs} onDeleteClub={onDeleteClub} cfg={cfg} up={up} />
+              {((cfg.jpHolds || []).length > 0 || Object.values(cfg.jackpots || {}).some((v) => Math.abs(+v || 0) > 0.005)) && <><div style={{ height: 14 }} /><AABBJHoldsCard model={model} cfg={cfg} up={up} period={period} /></>}
             </>
           )}
 
@@ -4484,14 +3762,13 @@ function AllAmerican({ club, clubs, saveClubs, onDeleteClub }) {
                     ))
                   )}
                   <div style={{ fontSize: 12, color: "var(--barSubtle)", marginTop: 8 }}>
-                    Transfers compare what each owner collected against his collectable share. {model.jpInCollections ? "The jackpot shares settle through the transfer (contribution came out of players' P&L, so the collectors hold the cash). " : "Excluded on purpose: the jackpot shares (that cash sits in the jackpot pool, held by no one). "}Stake/action books are always excluded (settled separately). Own-account P&L IS in the transfer — an owner's winnings get paid out of the week's collections.
                     {model.ready && (model.balanceOk ? " Balance check: ✓ books tie out." : ` ⚠ Books off by ${fmt(model.imbalance)} — the export's P&L doesn't net to its rake (promos, uncollected pots, or jackpot drop inside P&L).`)}
                   </div>
                 </div>
               </div>
 
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(310px, 1fr))", gap: 14, marginBottom: 18 }}>
-                <Card title="Bad beat jackpot" right={<Pill tone="gold">by JP % · profit, no holder</Pill>}>
+                {(Math.abs(jackpot) > 0.005 || showJp || Object.values(cfg.jackpots || {}).some((v) => Math.abs(+v || 0) > 0.005)) ? <Card title="Bad beat jackpot">
                   <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
                     <span style={{ fontSize: 13.5, color: C.mute }}>Contribution this week</span>
                     <NumInput value={jackpot} onChange={setJackpot} width={100} />
@@ -4530,35 +3807,34 @@ function AllAmerican({ club, clubs, saveClubs, onDeleteClub }) {
                       BBJ holds in effect this week — set up or edit these on Owners & setup. The held owner's other settlements (personal lines, own accounts) are unaffected; only their jackpot line moves.
                     </div>
                   )}
-                </Card>
+                </Card> : <div><button onClick={() => setShowJp(true)} style={{ border: `1px dashed ${C.line}`, background: "none", color: C.mute, borderRadius: 10, padding: "14px 18px", cursor: "pointer", fontSize: 13, width: "100%" }}>+ Enter a bad beat jackpot for this week</button></div>}
 
-                <Card title="Union economics">
+                <Card title="Club economics">
                   {ownerRow("Rake collected", model.clubRevenue)}
-                  {ownerRow("Rakeback → agents (pool lines)", -model.agentRB)}
-                  {ownerRow("Rakeback → players on personal lines", -model.personalRB)}
-                  {ownerRow("RB credits → stake/action deals", -model.backedRB)}
-                  {ownerRow("Feeback → owners' own accounts", -model.ownFeeback, { rule: true })}
-                  {ownerRow(`Pool (agent lines only, ${H.poolLabel})`, model.pool, { bold: true })}
-                  {ownerRow("Personal margins (owner-routed)", model.totalPersonalMargin, { bold: true })}
-                  {ownerRow("Stake/action rake margins → backer", model.totalDealMargin, { bold: true })}
-                  <div style={{ fontSize: 12, color: C.mute, marginTop: 8 }}>
-                    The pool is agent-line margins only. Personal-line margins and the rake margin on staked/action players skip the pool — they land straight on their owner's / backer's card.
-                  </div>
+                  {ownerRow("Rakeback → pool lines", -model.agentRB)}
+                  {nzRow("Rakeback → players on personal lines", -model.personalRB)}
+                  {nzRow("RB credits → stake/action deals", -model.backedRB)}
+                  {nzRow("Feeback → owners' own accounts", -model.ownFeeback)}
+                  {model.feeRows.filter((x) => x.amount).map((x) => ownerRow(`${x.label} fee (${x.pct}%)`, -x.amount))}
+                  {ownerRow(`Pool after fees (${H.poolLabel})`, model.pool, { bold: true })}
+                  {nzRow("Personal margins (owner-routed)", model.totalPersonalMargin, { bold: true })}
+                  {nzRow("Stake/action rake margins → backer", model.totalDealMargin, { bold: true })}
                 </Card>
               </div>
 
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(310px, 1fr))", gap: 14 }}>
                 {ownerIds.map((o) => (
-                  <Card key={o} title={`${lbl(o)} — profit`} right={H.poolShare(o) <= 0 ? <Pill>margin + own + JP</Pill> : <Pill>pool + margin + own + JP</Pill>}>
+                  <Card key={o} title={`${lbl(o)} — profit`}>
                     {H.poolShare(o) > 0 && ownerRow(`Pool share (${H.pctS(H.poolShare(o))})`, model.poolShares[o])}
-                    {ownerRow("Personal-line margin · 100%", model.personalMargin[o])}
-                    {ownerRow("Stake/action rake margin · his deals", model.dealMargin[o])}
-                    {ownerRow("Own accounts P&L", model.ownPosition[o])}
+                    {nzRow("Personal-line margin · 100%", model.personalMargin[o])}
+                    {nzRow("Stake/action rake margin · his deals", model.dealMargin[o])}
+                    {nzRow("Own accounts P&L", model.ownPosition[o])}
+                    {Math.abs(model.feeToOwner[o]) > 0.005 && ownerRow("Fees paid to him", model.feeToOwner[o])}
                     {(() => {
                       const heldAway = model.jpHoldMoves.find((m) => m.forOwnerId === o);
                       const heldFor = model.jpHoldMoves.filter((m) => m.holderId === o);
                       const label = heldAway ? `Jackpot share — held by ${lbl(heldAway.holderId)}` : heldFor.length ? `Jackpot share (${H.pctS(H.jpShareOf(o))}) + holding ${heldFor.map((m) => lbl(m.forOwnerId)).join(", ")}'s BBJ` : `Jackpot share (${H.pctS(H.jpShareOf(o))})`;
-                      return ownerRow(label, model.jpShares[o], { rule: true });
+                      return Math.abs(model.jpShares[o]) > 0.005 ? ownerRow(label, model.jpShares[o], { rule: true }) : <div style={{ borderBottom: `1px solid ${C.line}` }} />;
                     })()}
                     {ownerRow(`Profit — ${club.name}`, model.profit[o], { bold: true })}
                     <div style={{ marginTop: 10 }}>
@@ -4577,6 +3853,11 @@ function AllAmerican({ club, clubs, saveClubs, onDeleteClub }) {
                   </Card>
                 ))}
               </div>
+              <Notes>
+                <div><b>Transfers</b> compare what each owner collected against his collectable share. Stake/action books settle separately. Own-account P&L is in the transfer — an owner's winnings are paid out of the week's collections.</div>
+                <div><b>Pool</b> = agent-line margins (plus stake rake if the club routes it there), minus club fees, split by pool %. Personal-line margins go 100% to their owner.</div>
+                <div><b>Bad beat jackpot</b> splits by JP %. If the cash sits in the jackpot pool it's excluded from the transfer; if it came out of players' P&L the collectors hold it and it settles through the transfer.</div>
+              </Notes>
             </>
           )}
         </>
@@ -4867,7 +4148,7 @@ async function collectPendingWeeks(persons, clubs) {
       if (!dealId) return;
       unifiedFeeds.push({ dealId, date: today(), game: site, pnl: r2(e.net), holder: "ak", note: `auto · ${site} · ${aa.period}`, cp: resolve(e.name, site, "player"), noteMatch: `${site} · ${e.name} (stake)` });
     });
-    pending.push({ sourceKey: `aa:${club.id === "allamerican" ? "" : club.id + ":"}${aa.period}`, label: `${site} · ${aa.period}`, items, stakingItems, unifiedFeeds });
+    pending.push({ sourceKey: club.id === "fishtank" ? `ft:${aa.period}` : `aa:${club.id === "allamerican" ? "" : club.id + ":"}${aa.period}`, label: `${site} · ${aa.period}`, items, stakingItems, unifiedFeeds });
     Object.entries(aa.cfg?.backed || {}).forEach(([k, b]) => { const sh = shareFn(b.backer); if (b.deal !== "action" && sh > 0) live.push({ name: mapName(b.name, site), rawName: b.name, site, makeup: r2((b.makeup || 0) * sh), share: sh, rb: `RB ${b.rbNormal}% / ${b.rbMakeup}% · player ${b.playerProfitPct ?? 50}%` }); });
   }
   if (acfg) {
@@ -5798,7 +5079,7 @@ function TabsLedger({ clubs }) {
   };
 
   // ——— persons ———
-  const SITES = ["", "Fish Tank", ...(clubs || []).map((c) => c.name), "My Clubs"];
+  const SITES = ["", ...new Set(["Fish Tank", ...(clubs || []).map((c) => c.name)]), "My Clubs"];
   const [newPerson, setNewPerson] = useState("");
   const [addAlias, setAddAlias] = useState({});
   const [pickerOpen, setPickerOpen] = useState({});
