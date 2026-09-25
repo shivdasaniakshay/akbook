@@ -7,7 +7,7 @@ import { store, blobPut as idbPut, blobGet as idbGet, blobDel as idbDel } from "
 
 // ———————————————— Seed / snapshot ————————————————
 // Everything the app knows lives under these localStorage keys.
-const STATE_KEYS_STATIC = ["fishtank-config-v4", "fishtank-lastweek-v4", "agentclubs-v3", "tabs-v1", "allamerican-v1", "allamerican-lastweek-v1", "ownerclubs-v1", "archive-index-v1"];
+const STATE_KEYS_STATIC = ["fishtank-config-v4", "fishtank-lastweek-v4", "agentclubs-v3", "tabs-v1", "allamerican-v1", "allamerican-lastweek-v1", "ownerclubs-v1", "archive-index-v1", "book-weeks-v1", "book-checklist-v1"];
 // Owner clubs added later live under oc-cfg-* / oc-week-* keys — pick those up too.
 const allStateKeys = () => {
   const all = [...STATE_KEYS_STATIC];
@@ -4979,6 +4979,14 @@ async function loadBookChecklist() {
 }
 async function saveBookChecklist(items) { try { await store.set(BOOK_CHECKLIST_KEY, JSON.stringify({ items })); } catch (e) {} }
 
+// Saved weekly snapshots of the Book summary (label → totals), same key/shape as the aks-book site.
+const BOOK_WEEKS_KEY = "book-weeks-v1";
+async function loadBookWeeks() {
+  try { const c = await store.get(BOOK_WEEKS_KEY); if (c?.value) { const v = JSON.parse(c.value); if (v && typeof v.weeks === "object") return v.weeks; } } catch (e) {}
+  return {};
+}
+async function saveBookWeeks(weeks) { try { await store.set(BOOK_WEEKS_KEY, JSON.stringify({ weeks })); } catch (e) {} }
+
 function BookSection() {
   const [subtab, setSubtab] = useState("summary");
   const [loaded, setLoaded] = useState(false);
@@ -4987,21 +4995,32 @@ function BookSection() {
   const [agent, setAgent] = useState(null);
   const [persons, setPersons] = useState([]);
   const [checklist, setChecklist] = useState([]);
+  const [weeks, setWeeks] = useState({});
   const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => { (async () => {
     setLoaded(false);
-    const [ftM, ocM, agM, ppl, cl] = await Promise.all([loadFishTankModel(), loadAllOwnerClubModels(), loadAgentModel(), loadPersons(), loadBookChecklist()]);
-    setFt(ftM); setOwnerClubs(ocM); setAgent(agM); setPersons(ppl); setChecklist(cl);
+    const [ftM, ocM, agM, ppl, cl, wk] = await Promise.all([loadFishTankModel(), loadAllOwnerClubModels(), loadAgentModel(), loadPersons(), loadBookChecklist(), loadBookWeeks()]);
+    setFt(ftM); setOwnerClubs(ocM); setAgent(agM); setPersons(ppl); setChecklist(cl); setWeeks(wk);
     setLoaded(true);
   })(); }, [refreshKey]);
 
   const saveChecklist = async (items) => { setChecklist(items); await saveBookChecklist(items); };
+  const saveWeeks = async (w) => { setWeeks(w); await saveBookWeeks(w); };
+  // Snapshot the live summary under a label (e.g. "09/01 - 09/07") so it shows in Saved weeks.
+  const saveCurrentWeek = async () => {
+    const t = bookTotals({ ft, ownerClubs, agent });
+    const label = window.prompt("Save this week's totals under what label? (e.g. 09/01 - 09/07)", t.period || "");
+    if (!label) return;
+    if (weeks[label] && !window.confirm(`"${label}" is already saved — overwrite it with today's numbers?`)) return;
+    await saveWeeks({ ...weeks, [label]: { ...t, savedAt: new Date().toISOString() } });
+    setSubtab("weeks");
+  };
 
   return (
     <div>
       <div style={{ display: "flex", gap: 4, padding: "10px 26px 0", borderBottom: `2px solid ${C.line}`, background: C.paper, flexWrap: "wrap", alignItems: "center" }}>
-        {[["summary", "Summary"], ["checklist", "Checklist"]].map(([k, label]) => (
+        {[["summary", "Summary"], ["weeks", `Saved weeks${Object.keys(weeks).length ? ` (${Object.keys(weeks).length})` : ""}`], ["checklist", "Checklist"]].map(([k, label]) => (
           <button key={k} onClick={() => setSubtab(k)} style={{
             border: "none", cursor: "pointer", padding: "9px 16px", fontSize: 13.5, fontWeight: 700,
             background: subtab === k ? C.card : "transparent", color: subtab === k ? C.ink : C.mute,
@@ -5010,12 +5029,14 @@ function BookSection() {
             {label}
           </button>
         ))}
-        <button onClick={() => setRefreshKey((k) => k + 1)} title="Reload Fish Tank / owner club / My Clubs data" style={{ marginLeft: "auto", marginBottom: 6, border: `1px solid ${C.line}`, background: "none", color: C.mute, cursor: "pointer", borderRadius: 6, padding: "4px 10px", fontSize: 12 }}>↻ Refresh</button>
+        {subtab === "summary" && loaded && <button onClick={saveCurrentWeek} title="Save these totals as a week in Saved weeks" style={{ marginLeft: "auto", marginBottom: 6, border: `1px solid ${C.line}`, background: "none", color: C.ink, cursor: "pointer", borderRadius: 6, padding: "4px 10px", fontSize: 12, fontWeight: 600 }}>Save week</button>}
+        <button onClick={() => setRefreshKey((k) => k + 1)} title="Reload Fish Tank / owner club / My Clubs data" style={{ marginLeft: subtab === "summary" && loaded ? 6 : "auto", marginBottom: 6, border: `1px solid ${C.line}`, background: "none", color: C.mute, cursor: "pointer", borderRadius: 6, padding: "4px 10px", fontSize: 12 }}>↻ Refresh</button>
       </div>
       <div style={{ padding: "20px 26px 60px", maxWidth: 1180, margin: "0 auto" }}>
         {!loaded ? <div style={{ color: C.mute, padding: 20 }}>Loading…</div> : (
           <>
             {subtab === "summary" && <BookSummary ft={ft} ownerClubs={ownerClubs} agent={agent} />}
+            {subtab === "weeks" && <BookSavedWeeks weeks={weeks} save={saveWeeks} />}
             {subtab === "checklist" && <BookChecklist items={checklist} save={saveChecklist} persons={persons} />}
           </>
         )}
@@ -5043,6 +5064,106 @@ function backedChopMakeup(entities, shareFn) {
     if (e.inMakeup) makeup += e.makeupAfter * share;
   });
   return { chop: r2(chop), makeup: r2(makeup) };
+}
+
+// Same math as BookSummary, flattened into the book-weeks-v1 snapshot shape.
+function bookTotals({ ft, ownerClubs, agent }) {
+  const ftPersonal = ft ? ft.model.ownPosition.ak : 0;
+  const ftFee = ft ? r2(ft.model.entitle.ak - ftPersonal - ft.model.backedBook.ak) : 0;
+  const ocRows = ownerClubs.map((oc) => {
+    const meId = oc.club.meId;
+    const personal = oc.model.ownPosition[meId] || 0;
+    return { name: oc.club.name, period: oc.period, personal, fee: r2((oc.model.profit[meId] || 0) - personal) };
+  });
+  const ocPersonalTotal = r2(ocRows.reduce((a, o) => a + o.personal, 0));
+  const ocFeeTotal = r2(ocRows.reduce((a, o) => a + o.fee, 0));
+  const ocLabel = ocRows.length === 1 ? ocRows[0].name : ocRows.length > 1 ? "Owner clubs" : "Owner club";
+  const ocFeeLabel = ocRows.length === 1 ? `${ocRows[0].name} ownership share (pool + BBJ share + personal margin + stake margin)` : `${ocLabel} ownership share`;
+  const myAcc = agent ? new Set((agent.acfg.myAccounts || []).map((n) => n.trim().toLowerCase()).filter(Boolean)) : new Set();
+  const myPlayRows = agent ? agent.model.allPlayers.filter((p) => p.played && myAcc.has(p.name.trim().toLowerCase())) : [];
+  const myPlayTotal = r2(myPlayRows.reduce((a, p) => a + p.settlement, 0));
+  const mcMargin = agent ? agent.model.totals.margin : 0;
+  const mcAdj = agent ? agent.model.totals.globalAdjTotal : 0;
+  const personalTotal = r2(ftPersonal + ocPersonalTotal + myPlayTotal);
+  const rakeProfitTotal = r2(ftFee + ocFeeTotal + mcMargin);
+  const clubTotal = r2(personalTotal + rakeProfitTotal);
+  return { period: ft?.period || "", ftPersonal, ftFee, ocRows, ocPersonalTotal, ocFeeTotal, ocLabel, ocFeeLabel, myPlayTotal, myPlayNames: [...new Set(myPlayRows.map((p) => p.name))], mcMargin, mcAdj, personalTotal, rakeProfitTotal, clubTotal, grandTotal: clubTotal, hasFt: !!ft, hasAgent: !!agent };
+}
+
+// Read-only view of saved weeks; renders whichever fields a snapshot has (older site snapshots carry staking/vig/misc too).
+function BookSavedWeeks({ weeks, save }) {
+  const labels = Object.keys(weeks).sort((a, b) => (weeks[b]?.savedAt || "").localeCompare(weeks[a]?.savedAt || ""));
+  const [sel, setSel] = useState(labels[0] || "");
+  const w = weeks[sel];
+  const row = (label, val, opts = {}) => (
+    <div style={{ display: "flex", padding: "5px 0", fontSize: 13.5, paddingLeft: opts.indent ? 16 : 0, borderTop: opts.line ? `1px solid ${C.line}` : "none" }}>
+      <span style={{ color: opts.bold ? C.ink : C.mute, fontWeight: opts.bold ? 700 : 400 }}>{label}</span>
+      <span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums", fontWeight: opts.bold ? 700 : 500 }}>{money(val || 0)}</span>
+    </div>
+  );
+  const del = async () => {
+    if (!sel || !window.confirm(`Delete the saved week "${sel}"? This can't be undone.`)) return;
+    const next = { ...weeks }; delete next[sel];
+    await save(next); setSel(Object.keys(next)[0] || "");
+  };
+  if (!labels.length) return <Card title="No saved weeks yet"><div style={{ color: C.mute, fontSize: 13 }}>Use <b>Save week</b> on the Summary tab to snapshot a week's totals.</div></Card>;
+  const peopleRows = (title, rows, key) => rows?.length > 0 && (
+    <Card title={title}>
+      {rows.map((r) => (
+        <div key={r.name} style={{ display: "flex", gap: 10, padding: "5px 0", fontSize: 12.5, borderTop: `1px solid ${C.line}`, flexWrap: "wrap" }}>
+          <b>{r.name}</b><span style={{ color: C.mute }}>{(r.sites || []).join(", ")}</span>
+          <span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums" }}>{key === "makeup" ? <>chop {money(r.chop)} · accrued makeup <b style={{ color: C.goldDark }}>{fmt(r.accrued)}</b></> : <>net {money(r.net)}</>}</span>
+        </div>
+      ))}
+    </Card>
+  );
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <select value={sel} onChange={(e) => setSel(e.target.value)} style={{ padding: "6px 8px", borderRadius: 6, border: `1px solid ${C.line}`, background: C.card, color: C.ink, fontSize: 13 }}>
+          {labels.map((l) => <option key={l} value={l}>{l}</option>)}
+        </select>
+        {w?.savedAt && <span style={{ color: C.mute, fontSize: 12 }}>saved {new Date(w.savedAt).toLocaleString()}{w.reconstructed ? " · reconstructed" : ""}</span>}
+        <button onClick={del} style={{ marginLeft: "auto", border: `1px solid ${C.line}`, background: "none", color: C.red, cursor: "pointer", borderRadius: 6, padding: "4px 10px", fontSize: 12 }}>Delete week</button>
+      </div>
+      {w && (<>
+        <Card title={`Week ${sel}`}>
+          {w.period && <div style={{ color: C.mute, fontSize: 12, marginBottom: 6 }}>{w.period}</div>}
+          {row("GRAND TOTAL", w.grandTotal ?? w.clubTotal, { bold: true })}
+          {row("Club weekly P&L", w.clubTotal, { line: true, bold: true })}
+          {row("Personal play total", w.personalTotal, { indent: true })}
+          {row("All in Fish Tank", w.ftPersonal, { indent: true })}
+          {row(w.ocLabel || "Owner clubs", w.ocPersonalTotal, { indent: true })}
+          {row(`Remaining clubs${w.myPlayNames?.length ? ` (${w.myPlayNames.join(", ")})` : ""}`, w.myPlayTotal, { indent: true })}
+          {row("Fee margin total", w.rakeProfitTotal, { indent: true })}
+          {row("All in Fish Tank ownership share", w.ftFee, { indent: true })}
+          {row(w.ocFeeLabel || "Owner clubs ownership share", w.ocFeeTotal, { indent: true })}
+          {row("Personal DL margin", w.mcMargin, { indent: true })}
+          {w.stakingVigMiscTotal != null && <>
+            {row("Staking + vig + misc", w.stakingVigMiscTotal, { line: true, bold: true })}
+            {row("Makeup chopped profit", w.makeupChopTotal, { indent: true })}
+            {row("Action buy net", w.actionNetTotal, { indent: true })}
+            {row(`Vig${w.priorWeekStart ? ` (${w.priorWeekStart} – ${w.priorWeekEnd})` : ""}`, w.vigWeekTotal, { indent: true })}
+            {row("Misc P&L", w.miscWeekTotal, { indent: true })}
+          </>}
+          {w.makeupAccruedTotal != null && <div style={{ color: C.mute, fontSize: 12, marginTop: 6 }}>Accrued makeup (open marker, not in totals): <b style={{ color: C.goldDark }}>{fmt(w.makeupAccruedTotal)}</b></div>}
+        </Card>
+        {w.ocRows?.length > 1 && (
+          <Card title="Owner clubs — by club">
+            {w.ocRows.map((o) => <div key={o.name} style={{ display: "flex", gap: 10, padding: "5px 0", fontSize: 12.5, borderTop: `1px solid ${C.line}`, flexWrap: "wrap" }}><b>{o.name}</b><span style={{ color: C.mute }}>{o.period}</span><span style={{ marginLeft: "auto" }}>personal play {money(o.personal)} · fee margin {money(o.fee)}</span></div>)}
+          </Card>
+        )}
+        {peopleRows("Makeup stakes", w.makeupRows, "makeup")}
+        {peopleRows("Action buys", w.actionRows, "action")}
+        {(w.vigRows?.length > 0 || w.miscRows?.length > 0) && (
+          <Card title="Vig & misc">
+            {(w.vigRows || []).map((r) => row(`Vig · ${r.name}`, r.vig))}
+            {(w.miscRows || []).map((r, i) => <div key={i}>{row(`Misc · ${r.category || "uncategorized"}`, r.amount)}</div>)}
+          </Card>
+        )}
+      </>)}
+    </div>
+  );
 }
 
 function BookSummary({ ft, ownerClubs, agent }) {
