@@ -11,7 +11,7 @@ const STATE_KEYS_STATIC = ["fishtank-config-v4", "fishtank-lastweek-v4", "agentc
 // Owner clubs added later live under oc-cfg-* / oc-week-* keys — pick those up too.
 const allStateKeys = () => {
   const all = [...STATE_KEYS_STATIC];
-  try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && (k.startsWith("oc-cfg-") || k.startsWith("oc-week-")) && !all.includes(k)) all.push(k); } } catch (e) {}
+  try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && (k.startsWith("oc-cfg-") || k.startsWith("oc-week-") || k.startsWith("wk:")) && !all.includes(k)) all.push(k); } } catch (e) {}
   return all;
 };
 
@@ -35,7 +35,7 @@ async function applySeedOnce() {
     } catch (e) {}
   }
   if (!seed || typeof seed !== "object") return;
-  for (const k of new Set([...STATE_KEYS_STATIC, ...Object.keys(seed).filter((k) => k.startsWith("oc-cfg-") || k.startsWith("oc-week-"))])) {
+  for (const k of new Set([...STATE_KEYS_STATIC, ...Object.keys(seed).filter((k) => k.startsWith("oc-cfg-") || k.startsWith("oc-week-") || k.startsWith("wk:"))])) {
     try {
       if (seed[k] != null && localStorage.getItem(k) == null)
         await store.set(k, typeof seed[k] === "string" ? seed[k] : JSON.stringify(seed[k]));
@@ -60,7 +60,7 @@ function exportSnapshot() {
 async function importSnapshot(file) {
   const seed = JSON.parse(await file.text());
   let n = 0;
-  const keys = [...new Set([...STATE_KEYS_STATIC, ...Object.keys(seed).filter((k) => k.startsWith("oc-cfg-") || k.startsWith("oc-week-"))])];
+  const keys = [...new Set([...STATE_KEYS_STATIC, ...Object.keys(seed).filter((k) => k.startsWith("oc-cfg-") || k.startsWith("oc-week-") || k.startsWith("wk:"))])];
   for (const k of keys) {
     if (seed[k] != null) { await store.set(k, typeof seed[k] === "string" ? seed[k] : JSON.stringify(seed[k])); n++; }
   }
@@ -84,6 +84,7 @@ const PALETTES = {
     "--barGreen": "#7CCB8B", "--barRed": "#F0958A",
     "--pillRedBg": "#F9E4E1", "--pillGreenBg": "#E3F1E5", "--pillBlueBg": "#E2ECF4", "--pillGoldBg": "#F1E8D3",
     "--pillBlueFg": "#31587A", "--chipOff": "#C9BFA9", "--errBg": "#F9E4E1",
+    "--s1": "#2a78d6", "--s2": "#eb6834", "--s3": "#4a3aa7",
   },
   dark: {
     "--paper": "#131009", "--card": "#1D180F", "--cream": "#262013", "--gold": "#D4B36A",
@@ -94,6 +95,7 @@ const PALETTES = {
     "--barGreen": "#84D695", "--barRed": "#F49C90",
     "--pillRedBg": "#43231C", "--pillGreenBg": "#1C3A24", "--pillBlueBg": "#1E2E3D", "--pillBlueFg": "#A6CBEA",
     "--pillGoldBg": "#3B3013", "--chipOff": "#5F5439", "--errBg": "#43231C",
+    "--s1": "#3987e5", "--s2": "#d95926", "--s3": "#9085e9",
   },
 };
 const C = {
@@ -584,7 +586,21 @@ async function archiveWeek(site, siteName, period, generate) {
   await saveArchiveIndex(idx);
   return rec;
 }
+// Each week's underlying data (players + deals at the time) lives in the synced store,
+// so any signed-in browser can reopen the numbers and rebuild the Excel.
+const wkKey = (site, period) => `wk:${site}:${period}`;
+async function archiveWeekData(club, cfg, players, period, jackpotFromExport) {
+  if (!period || !players?.length) return;
+  await store.set(wkKey(club.id, period), JSON.stringify({ site: club.id, siteName: club.name, period, players, cfg, jackpotFromExport: jackpotFromExport ?? null, savedAt: new Date().toISOString() }));
+  const idx = await loadArchiveIndex();
+  const old = idx.weeks.find((w) => w.site === club.id && w.period === period);
+  const rec = { ...(old || { site: club.id, siteName: club.name, period, archivedAt: new Date().toISOString(), hasRaw: false, rawName: "", gen: [] }), siteName: club.name, hasData: true };
+  idx.weeks = [...idx.weeks.filter((w) => w !== old), rec];
+  await saveArchiveIndex(idx);
+}
+async function loadArchivedWeek(site, period) { try { const c = await store.get(wkKey(site, period)); return c?.value ? JSON.parse(c.value) : null; } catch (e) { return null; } }
 async function deleteArchivedWeek(site, period) {
+  try { await store.del(wkKey(site, period)); } catch (e) {}
   await idbDel(rawKey(site, period)).catch(() => {});
   await idbDel(genKey(site, period)).catch(() => {});
   const idx = await loadArchiveIndex();
@@ -594,54 +610,104 @@ async function deleteArchivedWeek(site, period) {
 
 function ArchiveView({ clubs }) {
   const [idx, setIdx] = useState(null);
+  const [open, setOpen] = useState(null); // `${site}|${period}`
+  const [detail, setDetail] = useState(null);
+  const pastRef = useRef(null); const [pastClub, setPastClub] = useState(null);
   const reload = async () => setIdx(await loadArchiveIndex());
-  useEffect(() => { reload(); }, []);
+  useEffect(() => { (async () => {
+    // Make sure every club's current week is in the archive too.
+    for (const c of clubs) {
+      try { const d = await store.get(c.weekKey), cf = await store.get(c.cfgKey);
+        if (d?.value && cf?.value) { const w = JSON.parse(d.value); const has = await store.get(wkKey(c.id, w.period)); if (!has?.value && w.players?.length) await archiveWeekData(c, { ...AA_DEFAULT_CFG, ...JSON.parse(cf.value) }, w.players, w.period, w.jackpotFromExport); } } catch (e) {}
+    }
+    reload();
+  })(); }, []);
   if (!idx) return <div style={{ padding: 40, color: C.mute }}>Loading…</div>;
-  const dlRaw = async (w) => { const r = await idbGet(rawKey(w.site, w.period)); if (r?.buf) downloadBytes(r.buf, r.name || `${w.siteName}_${w.period}_raw.xlsx`); else window.alert("Raw file not stored for this week (uploaded before archiving existed)."); };
-  const dlGen = async (w, i) => { const g = await idbGet(genKey(w.site, w.period)); const f = g?.files?.[i]; if (f) downloadBytes(f.buf, f.name); else window.alert("File not found."); };
-  const dlAllGen = async (w) => { const g = await idbGet(genKey(w.site, w.period)); (g?.files || []).forEach((f) => downloadBytes(f.buf, f.name)); };
-  const sites = [...new Set(idx.weeks.map((w) => w.site))];
-  const siteLabel = (w) => (w.site === "fishtank" ? "Fish Tank" : (clubs.find((c) => c.id === w.site)?.name || w.siteName || w.site));
+  const clubOf = (w) => clubs.find((c) => c.id === w.site) || { id: w.site, name: w.siteName || w.site, owners: [], meId: null };
+  const toggle = async (w) => {
+    const k = w.site + "|" + w.period;
+    if (open === k) { setOpen(null); return; }
+    setOpen(k); setDetail(null);
+    const d = await loadArchivedWeek(w.site, w.period);
+    if (d) { const club = clubOf(w); setDetail({ club, d, model: buildAAModel(d.players, { ...AA_DEFAULT_CFG, ...d.cfg }, d.period, club) }); }
+    else setDetail({ missing: true });
+  };
+  const dlRaw = async (w) => { const r = await idbGet(rawKey(w.site, w.period)).catch(() => null); if (r?.buf) downloadBytes(r.buf, r.name || `${w.siteName}_${w.period}_raw.xlsx`); else window.alert("The raw upload wasn't stored for this week."); };
+  const dlGen = async (w, i) => { const g = await idbGet(genKey(w.site, w.period)).catch(() => null); const f = g?.files?.[i]; if (f) downloadBytes(f.buf, f.name); else if (i === 0) window.alert("Those files weren't carried over from the old site. Use \"Add a past week\" with the raw export to bring the numbers back."); };
+  // Re-upload an old export: its numbers are saved with the club's current deals.
+  const addPast = async (file) => {
+    const club = clubs.find((c) => c.id === pastClub); if (!club) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const { players, period, jackpot, jackpotFound } = parseWorkbook(buf);
+      const cf = await store.get(club.cfgKey); const cfg = { ...AA_DEFAULT_CFG, ...(cf?.value ? JSON.parse(cf.value) : {}) };
+      await archiveWeekData(club, cfg, players, period, jackpotFound ? jackpot : null);
+      try { await idbPut(rawKey(club.id, period), { site: club.id, siteName: club.name, period, name: file.name, buf }); const idx2 = await loadArchiveIndex(); idx2.weeks = idx2.weeks.map((w) => (w.site === club.id && w.period === period ? { ...w, hasRaw: true, rawName: file.name } : w)); await saveArchiveIndex(idx2); } catch (e) {}
+      reload();
+    } catch (e) { window.alert("Couldn't read that file: " + (e.message || e)); }
+  };
   const sortKey = (p) => (p || "").replace(/[^\d]/g, "");
+  const sites = [...new Set(idx.weeks.map((w) => w.site))].sort((x, y) => clubs.findIndex((c) => c.id === x) - clubs.findIndex((c) => c.id === y));
   return (
-    <div style={{ padding: "20px 26px 60px", maxWidth: 1180, margin: "0 auto" }}>
-      <div style={{ fontFamily: "Georgia, serif", fontSize: 19, marginBottom: 4 }}>Archive — finalized weeks</div>
-      <div style={{ color: C.mute, fontSize: 12.5, marginBottom: 16 }}>
-        Each time a new weekly export is uploaded to Fish Tank or an owner club, the week it replaces is stored here: the <b>raw upload</b> and the app's <b>generated settlement workbook</b> (built with the deals in place at that moment). Use "Archive this week" on a site to store the current week without waiting for Monday.
+    <div style={{ padding: "18px clamp(10px, 2vw, 26px) 60px", maxWidth: 1400, margin: "0 auto", display: "grid", gap: 14 }}>
+      <input ref={pastRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }} onChange={(e) => { const f = e.target.files?.[0]; if (f) addPast(f); e.target.value = ""; }} />
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ fontFamily: "Georgia, serif", fontSize: 19 }}>Archive</div>
+        <span style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+          <span style={{ fontSize: 12, color: C.mute }}>Add a past week:</span>
+          {clubs.map((c) => <Btn key={c.id} tone="ghost" small onClick={() => { setPastClub(c.id); setTimeout(() => pastRef.current?.click(), 0); }}>{c.name}</Btn>)}
+        </span>
       </div>
-      {idx.weeks.length === 0 && <Card title="Nothing archived yet"><div style={{ color: C.mute, fontSize: 13 }}>Upload next week's export and this week's files will land here automatically.</div></Card>}
+      {idx.weeks.length === 0 && <Card title="Nothing archived yet"><div style={{ color: C.mute, fontSize: 13 }}>Each uploaded week lands here automatically.</div></Card>}
       {sites.map((site) => {
-        const ws = idx.weeks.filter((w) => w.site === site).sort((a, b) => sortKey(b.period).localeCompare(sortKey(a.period)));
+        const ws = idx.weeks.filter((w) => w.site === site).sort((x, y) => sortKey(y.period).localeCompare(sortKey(x.period)));
+        const club = clubOf(ws[0]);
         return (
-          <div key={site} style={{ marginBottom: 16 }}>
-            <Card title={`${siteLabel(ws[0])} · ${ws.length} week${ws.length !== 1 ? "s" : ""}`}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead><tr style={{ background: C.cream }}>
-                  <th style={{ ...th, textAlign: "left" }}>Week</th><th style={{ ...th, textAlign: "left" }}>Archived</th>
-                  <th style={{ ...th, textAlign: "left" }}>Raw upload</th><th style={{ ...th, textAlign: "left" }}>Generated files</th><th style={th}></th>
-                </tr></thead>
-                <tbody>
-                  {ws.map((w, i) => (
-                    <tr key={w.period} style={{ background: i % 2 ? C.rowAlt : C.card, borderTop: `1px solid ${C.line}` }}>
-                      <td style={{ ...tdL, fontWeight: 700 }}>{w.period}</td>
-                      <td style={{ ...tdL, color: C.mute, fontSize: 12 }}>{(w.archivedAt || "").slice(0, 10)}</td>
-                      <td style={tdL}>{w.hasRaw ? <Btn tone="ghost" small onClick={() => dlRaw(w)}>{w.rawName || "raw .xlsx"}</Btn> : <span style={{ color: C.mute, fontSize: 12 }}>not stored</span>}</td>
-                      <td style={tdL}>
-                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          {(w.gen || []).map((n, j) => <Btn key={n + j} tone="gold" small onClick={() => dlGen(w, j)}>{n}</Btn>)}
-                          {(w.gen || []).length > 1 && <Btn tone="ghost" small onClick={() => dlAllGen(w)}>all</Btn>}
-                          {(w.gen || []).length === 0 && <span style={{ color: C.mute, fontSize: 12 }}>none</span>}
-                        </div>
-                      </td>
-                      <td style={{ ...td, width: 40 }}><button onClick={async () => { if (window.confirm(`Delete archived week ${w.period}?`)) { await deleteArchivedWeek(w.site, w.period); reload(); } }} style={{ border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 15 }}>×</button></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </Card>
-          </div>
+          <Card key={site} title={`${club.name} · ${ws.length} week${ws.length !== 1 ? "s" : ""}`}>
+            {ws.map((w) => {
+              const k = w.site + "|" + w.period, isOpen = open === k;
+              return (
+                <div key={w.period} style={{ borderTop: `1px solid ${C.line}` }}>
+                  <div style={{ display: "flex", gap: 10, alignItems: "center", padding: "7px 0", fontSize: 13, flexWrap: "wrap" }}>
+                    <button onClick={() => toggle(w)} style={{ border: "none", background: "none", color: C.ink, cursor: "pointer", fontWeight: 700, padding: 0, fontSize: 13 }}>{isOpen ? "▾" : "▸"} {bookLabel(w.period) || w.period}</button>
+                    {w.hasData ? <Pill tone="green">numbers saved</Pill> : <Pill>files only</Pill>}
+                    <span style={{ marginLeft: "auto", display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {w.hasRaw && <Btn tone="ghost" small onClick={() => dlRaw(w)}>Raw upload</Btn>}
+                      {(w.gen || []).length > 0 && <Btn tone="ghost" small onClick={() => (w.gen || []).forEach((_, j) => dlGen(w, j))}>Excel files ({w.gen.length})</Btn>}
+                      <button onClick={async () => { if (window.confirm(`Delete archived week ${w.period}?`)) { await deleteArchivedWeek(w.site, w.period); reload(); } }} style={{ border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 15 }}>×</button>
+                    </span>
+                  </div>
+                  {isOpen && (
+                    <div style={{ padding: "4px 0 12px 18px" }}>
+                      {!detail ? <div style={{ color: C.mute, fontSize: 12.5 }}>Loading…</div> : detail.missing ? <div style={{ color: C.mute, fontSize: 12.5 }}>Only files were kept for this week (it was archived before numbers were saved).</div> : (() => {
+                        const { model: m, club: cl, d } = detail; const H = m.H;
+                        return (
+                          <div style={{ display: "grid", gap: 8 }}>
+                            <div style={{ display: "flex", gap: 18, flexWrap: "wrap", fontSize: 13 }}>
+                              <span>Rake <b>{fmt(m.clubRevenue)}</b></span><span>Pool <b>{fmt(m.pool)}</b></span>
+                              {m.ownerIds.map((o) => <span key={o}>{H.lbl(o)} profit {money(m.profit[o])}</span>)}
+                              <span style={{ color: C.mute }}>{m.transfers.length ? m.transfers.map((t) => `${H.lbl(t.from)} pays ${H.lbl(t.to)} ${fmt(t.amount)}`).join(" · ") : m.ready ? "even" : "settle-up incomplete"}</span>
+                            </div>
+                            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                              <thead><tr><th style={{ ...th, textAlign: "left" }}>Line</th><th style={{ ...th, textAlign: "left" }}>Collected by</th><th style={th}>Winnings</th><th style={th}>Tips</th><th style={th}>Rakeback</th><th style={th}>Settlement</th></tr></thead>
+                              <tbody>{[...m.entities, ...m.backedEntities].map((e) => <tr key={e.key} style={{ borderTop: `1px solid ${C.line}` }}><td style={tdL}>{e.name}</td><td style={tdL}>{e.collector ? H.lbl(e.collector) : e.backer ? H.lbl(e.backer) : "—"}</td><td style={td}>{fmt(e.pnl)}</td><td style={td}>{fmt(e.fee)}</td><td style={td}>{fmt(e.tipback ?? e.rbCredit ?? 0)}</td><td style={td}>{money(-e.settlement)}</td></tr>)}</tbody>
+                            </table>
+                            <div style={{ display: "flex", gap: 8 }}>
+                              <Btn tone="gold" small onClick={() => downloadAAWorkbook(m, d.period, cl)}>Rebuild Excel</Btn>
+                              {m.ownerIds.map((o) => <Btn key={o} tone="ghost" small onClick={() => downloadAAOwnerExcel(m, o, d.period, cl)}>{H.lbl(o)} report</Btn>)}
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </Card>
         );
       })}
+      <Notes><div>Every week you upload is saved here with its numbers and the deals in place at the time, so anyone with the site link and passphrase can reopen it and rebuild its Excel. Raw uploads and generated files are kept too when available. Settlement is shown as + they owe the club / − the club owes them.</div></Notes>
     </div>
   );
 }
@@ -3528,6 +3594,7 @@ function AllAmerican({ club, clubs, saveClubs, onDeleteClub }) {
       const { players: p, period: per, jackpot: jp, jackpotFound } = parseWorkbook(buf);
       // Archive the week being replaced (raw upload + generated workbook) before it's gone.
       if (players && period && period !== per) {
+        try { await archiveWeekData(club, cfg, players, period, jpFromExport); } catch (e) {}
         try { await archiveWeek(club.id, club.name, period, async () => { await downloadAAWorkbook(model, period, club); for (const o of ownerIds) await downloadAAOwnerExcel(model, o, period, club); }); } catch (e) {}
       }
       const names = { ...cfg.names };
@@ -3537,6 +3604,7 @@ function AllAmerican({ club, clubs, saveClubs, onDeleteClub }) {
       await up(patch);
       setPlayers(p); setPeriod(per); setJpFromExport(jackpotFound ? Math.round(jp * 100) / 100 : null); setTab("settle");
       try { await store.set(club.weekKey, JSON.stringify({ players: p, period: per, jackpotFromExport: jackpotFound ? jp : null })); } catch (e) {}
+      try { await archiveWeekData(club, { ...cfg, ...patch }, p, per, jackpotFound ? jp : null); } catch (e) {}
       try { await idbPut(rawKey(club.id, per), { site: club.id, siteName: club.name, period: per, name: file.name, buf }); } catch (e) {}
     } catch (e) { setErr(e.message || String(e)); }
   };
@@ -3616,7 +3684,7 @@ function AllAmerican({ club, clubs, saveClubs, onDeleteClub }) {
             ))}
             <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center", paddingBottom: 6 }}>
               <span style={{ color: C.mute, fontSize: 12.5 }}>{period || "this week"}</span>
-              <Btn tone="ghost" small onClick={async () => { await archiveWeek(club.id, club.name, period, async () => { await downloadAAWorkbook(model, period, club); for (const o of ownerIds) await downloadAAOwnerExcel(model, o, period, club); }); setSaveNote(`Archived ${period} — see the Archive tab.`); }}>Archive this week</Btn>
+              <Btn tone="ghost" small onClick={async () => { await archiveWeekData(club, cfg, players, period, jpFromExport); await archiveWeek(club.id, club.name, period, async () => { await downloadAAWorkbook(model, period, club); for (const o of ownerIds) await downloadAAOwnerExcel(model, o, period, club); }); setSaveNote(`Archived ${period} — see the Archive tab.`); }}>Archive this week</Btn>
               <Btn tone="gold" small onClick={() => fileRef.current?.click()}>Upload weekly export</Btn>
             </div>
           </div>
@@ -4364,14 +4432,21 @@ async function loadBookWeeks() {
 }
 async function saveBookWeeks(weeks) { try { await store.set(BOOK_WEEKS_KEY, JSON.stringify({ weeks })); } catch (e) {} }
 
+// Book: this week's numbers with charts, plus a history of saved weeks.
+const bookLabel = (period) => { const m = String(period || "").match(/(\d{4})-(\d\d)-(\d\d)\s*~\s*(\d{4})-(\d\d)-(\d\d)/); return m ? `${m[2]}/${m[3]} - ${m[5]}/${m[6]}` : ""; };
+const shortLabel = (l) => bookLabel(l) || l;
+const bookSortKey = (w) => (String(w?.period || "").match(/\d{4}-\d\d-\d\d/) || [w?.priorWeekStart || w?.savedAt || ""])[0];
+// Older snapshots kept Fish Tank separate from the club list; fold it in so every week reads the same.
+const bookClubs = (t) => [...((Math.abs(t.ftPersonal || 0) + Math.abs(t.ftFee || 0)) > 0.005 && !(t.ocRows || []).some((o) => o.name === "Fish Tank") ? [{ name: "Fish Tank", personal: t.ftPersonal || 0, fee: t.ftFee || 0 }] : []), ...(t.ocRows || []),
+  ...((Math.abs(t.myPlayTotal || 0) + Math.abs(t.mcMargin || 0)) > 0.005 ? [{ name: "My Clubs", personal: t.myPlayTotal || 0, fee: t.mcMargin || 0 }] : [])];
+const bookGrand = (t) => t.grandTotal ?? r2((t.clubTotal || 0) + (t.stakingVigMiscTotal || 0));
+
 function BookSection() {
-  const [subtab, setSubtab] = useState("summary");
+  const [subtab, setSubtab] = useState("week");
   const [loaded, setLoaded] = useState(false);
-  const [ft, setFt] = useState(null);
   const [ownerClubs, setOwnerClubs] = useState([]);
   const [agent, setAgent] = useState(null);
   const [persons, setPersons] = useState([]);
-  const [checklist, setChecklist] = useState([]);
   const [tabs, setTabs] = useState(null);
   const [bookWeeks, setBookWeeks] = useState({});
   const [viewWeek, setViewWeek] = useState(""); // "" = live; else a saved week's label
@@ -4379,68 +4454,226 @@ function BookSection() {
 
   useEffect(() => { (async () => {
     setLoaded(false);
-    const [ftM, ocM, agM, ppl, cl, tb, bw] = await Promise.all([loadFishTankModel(), loadAllOwnerClubModels(), loadAgentModel(), loadPersons(), loadBookChecklist(), loadTabs(), loadBookWeeks()]);
-    setFt(ftM); setOwnerClubs(ocM); setAgent(agM); setPersons(ppl); setChecklist(cl); setTabs(tb); setBookWeeks(bw);
+    const [ocM, agM, ppl, tb, bw] = await Promise.all([loadAllOwnerClubModels(), loadAgentModel(), loadPersons(), loadTabs(), loadBookWeeks()]);
+    setOwnerClubs(ocM); setAgent(agM); setPersons(ppl); setTabs(tb); setBookWeeks(bw);
     setLoaded(true);
   })(); }, [refreshKey]);
 
-  const saveChecklist = async (items) => { setChecklist(items); await saveBookChecklist(items); };
-
-  // This week's headline totals, computed once from whatever's currently
-  // loaded — both the live summary view and "+ Save this week" read off
-  // this same object, so what gets saved is exactly what's on screen.
-  const liveTotals = useMemo(() => computeBookTotals({ ft, ownerClubs, agent, tabs, persons }), [ft, ownerClubs, agent, tabs, persons]);
-  const savedWeekLabels = Object.keys(bookWeeks).sort((a, b) => (bookWeeks[b]?.savedAt || "").localeCompare(bookWeeks[a]?.savedAt || ""));
-  const displayTotals = viewWeek && bookWeeks[viewWeek] ? bookWeeks[viewWeek] : liveTotals;
+  const liveTotals = useMemo(() => computeBookTotals({ ft: null, ownerClubs, agent, tabs, persons }), [ownerClubs, agent, tabs, persons]);
+  const labels = Object.keys(bookWeeks).sort((x, y) => bookSortKey(bookWeeks[x]).localeCompare(bookSortKey(bookWeeks[y])));
+  const liveLabel = bookLabel(liveTotals.period);
+  const liveKey = labels.find((l) => shortLabel(l) === liveLabel) || liveLabel;
+  const shown = viewWeek && bookWeeks[viewWeek] ? bookWeeks[viewWeek] : liveTotals;
+  const shownLabel = viewWeek ? shortLabel(viewWeek) : liveLabel;
+  const prevLabel = labels.filter((l) => bookSortKey(bookWeeks[l]) < bookSortKey(shown) && shortLabel(l) !== shownLabel).pop();
 
   const saveThisWeek = async () => {
-    const label = window.prompt("Save this week's totals under what label? (e.g. 09/01 - 09/07)", liveTotals.period || "");
+    const label = liveKey || window.prompt("Label for this week (e.g. 09/01 - 09/07):", "");
     if (!label) return;
-    if (bookWeeks[label] && !window.confirm(`"${label}" is already saved — overwrite it with today's numbers?`)) return;
-    const snapshot = { ...liveTotals, savedAt: new Date().toISOString() };
-    const next = { ...bookWeeks, [label]: snapshot };
-    setBookWeeks(next); setViewWeek(label);
-    await saveBookWeeks(next);
+    if (bookWeeks[label] && !window.confirm(`"${shortLabel(label)}" is already saved — overwrite it with today's numbers?`)) return;
+    const next = { ...bookWeeks, [label]: { ...liveTotals, savedAt: new Date().toISOString() } };
+    setBookWeeks(next); await saveBookWeeks(next);
   };
-  const deleteSavedWeek = async () => {
-    if (!viewWeek || !window.confirm(`Delete the saved week "${viewWeek}"? This can't be undone.`)) return;
-    const next = { ...bookWeeks }; delete next[viewWeek];
-    setBookWeeks(next); setViewWeek("");
-    await saveBookWeeks(next);
+  const deleteWeek = async (label) => {
+    if (!window.confirm(`Delete the saved week "${shortLabel(label)}"? This can't be undone.`)) return;
+    const next = { ...bookWeeks }; delete next[label];
+    setBookWeeks(next); if (viewWeek === label) setViewWeek(""); await saveBookWeeks(next);
   };
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 4, padding: "10px 26px 0", borderBottom: `2px solid ${C.line}`, background: C.paper, flexWrap: "wrap", alignItems: "center" }}>
-        {[["summary", "Summary"], ["checklist", "Checklist"]].map(([k, label]) => (
-          <button key={k} onClick={() => setSubtab(k)} style={{
-            border: "none", cursor: "pointer", padding: "9px 16px", fontSize: 13.5, fontWeight: 700,
-            background: subtab === k ? C.card : "transparent", color: subtab === k ? C.ink : C.mute,
-            borderRadius: "8px 8px 0 0", marginBottom: -2,
-            boxShadow: subtab === k ? "0 -1px 4px rgba(0,0,0,0.1)" : "none" }}>
-            {label}
-          </button>
+      <div style={{ display: "flex", gap: 4, padding: "10px clamp(10px, 2vw, 26px) 0", borderBottom: `2px solid ${C.line}`, background: C.paper, flexWrap: "wrap", alignItems: "center" }}>
+        {[["week", "Week"], ["history", `History${labels.length ? ` · ${labels.length}` : ""}`]].map(([k, label]) => (
+          <button key={k} onClick={() => setSubtab(k)} style={{ border: "none", cursor: "pointer", padding: "9px 16px", fontSize: 13.5, fontWeight: 700, background: subtab === k ? C.card : "transparent", color: subtab === k ? C.ink : C.mute, borderRadius: "8px 8px 0 0", marginBottom: -2 }}>{label}</button>
         ))}
-        {subtab === "summary" && (
-          <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center", paddingBottom: 6 }}>
-            <select value={viewWeek} onChange={(e) => setViewWeek(e.target.value)} style={{ ...inputS, fontSize: 12.5 }}>
-              <option value="">Live (current data)</option>
-              {savedWeekLabels.map((k) => <option key={k} value={k}>{k}</option>)}
-            </select>
-            {viewWeek && <button title="Delete this saved week" onClick={deleteSavedWeek} style={{ border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 15 }}>×</button>}
-            <Btn tone="gold" small onClick={saveThisWeek}>+ Save this week</Btn>
-          </div>
-        )}
-        <button onClick={() => setRefreshKey((k) => k + 1)} title="Reload Fish Tank / owner club / My Clubs data" style={{ marginLeft: subtab === "summary" ? 0 : "auto", marginBottom: 6, border: `1px solid ${C.line}`, background: "none", color: C.mute, cursor: "pointer", borderRadius: 6, padding: "4px 10px", fontSize: 12 }}>↻ Refresh</button>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center", paddingBottom: 6 }}>
+          {subtab === "week" && <select value={viewWeek} onChange={(e) => setViewWeek(e.target.value)} style={{ ...inputS, fontSize: 12.5 }}>
+            <option value="">This week (live){liveLabel ? ` · ${liveLabel}` : ""}</option>
+            {[...labels].reverse().map((k) => <option key={k} value={k}>{shortLabel(k)}</option>)}
+          </select>}
+          {subtab === "week" && !viewWeek && (bookWeeks[liveKey] ? <Pill tone="green">saved</Pill> : null)}
+          <Btn tone="gold" small onClick={saveThisWeek}>{bookWeeks[liveKey] ? "Re-save this week" : "Save this week"}</Btn>
+          <button onClick={() => setRefreshKey((k) => k + 1)} title="Reload club data" style={{ border: `1px solid ${C.line}`, background: "none", color: C.mute, cursor: "pointer", borderRadius: 6, padding: "4px 10px", fontSize: 12 }}>↻</button>
+        </div>
       </div>
-      <div style={{ padding: "20px 26px 60px", maxWidth: 1180, margin: "0 auto" }}>
-        {!loaded ? <div style={{ color: C.mute, padding: 20 }}>Loading…</div> : (
-          <>
-            {subtab === "summary" && <BookSummary totals={displayTotals} viewingSaved={!!viewWeek} />}
-            {subtab === "checklist" && <BookChecklist items={checklist} save={saveChecklist} persons={persons} />}
-          </>
-        )}
+      <div style={{ padding: "18px clamp(10px, 2vw, 26px) 60px", maxWidth: 1400, margin: "0 auto" }}>
+        {!loaded ? <div style={{ color: C.mute, padding: 20 }}>Loading…</div> : subtab === "week"
+          ? <BookWeek t={shown} label={shownLabel} prev={prevLabel ? bookWeeks[prevLabel] : null} prevLabel={prevLabel && shortLabel(prevLabel)} saved={!!viewWeek} />
+          : <BookHistory weeks={bookWeeks} labels={labels} open={(l) => { setViewWeek(l); setSubtab("week"); }} del={deleteWeek} />}
       </div>
+    </div>
+  );
+}
+
+// ——— small SVG charts (one y-axis, zero baseline, hover tooltip) ———
+const shortMoney = (v) => { const a = Math.abs(v); return (v < 0 ? "-" : "") + (a >= 1000 ? (a / 1000).toFixed(a >= 10000 ? 0 : 1) + "k" : a.toFixed(0)); };
+function niceTicks(lo, hi) {
+  const span = hi - lo || 1, step0 = span / 4, mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((x) => x >= step0);
+  const out = []; let v = Math.floor(lo / step) * step; out.push(v);
+  while (v < hi - 1e-9) { v += step; out.push(v); }
+  return out;
+}
+// Chart width follows its container so text stays a normal size.
+function useWidth(init = 800) {
+  const ref = useRef(null); const [w, setW] = useState(init);
+  useEffect(() => { if (!ref.current) return; const ro = new ResizeObserver(([e]) => setW(Math.max(280, e.contentRect.width))); ro.observe(ref.current); return () => ro.disconnect(); }, []);
+  return [ref, w];
+}
+// groups: [{ label, values: { key: number } }], series: [{ key, label, color }]; colorBySign colors one series green/red.
+function BarChart({ groups, series, height = 220, colorBySign = false }) {
+  const [hover, setHover] = useState(null);
+  const [ref, W] = useWidth();
+  const H = height, padL = 46, padB = 26, padT = 10;
+  const vals = groups.flatMap((g) => series.map((s) => g.values[s.key] || 0));
+  const ticks = niceTicks(Math.min(0, ...vals), Math.max(0, ...vals));
+  const lo = ticks[0], hi = ticks[ticks.length - 1];
+  const y = (v) => padT + ((hi - v) / (hi - lo || 1)) * (H - padT - padB);
+  const gw = (W - padL) / Math.max(1, groups.length), bw = Math.max(3, Math.min(34, (gw * 0.6) / series.length));
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      {series.length > 1 && <div style={{ display: "flex", gap: 14, fontSize: 12, color: C.mute, marginBottom: 6 }}>{series.map((s) => <span key={s.key} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><span style={{ width: 10, height: 10, borderRadius: 2, background: s.color }} />{s.label}</span>)}</div>}
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }} onMouseLeave={() => setHover(null)}>
+        {ticks.map((t) => <g key={t}><line x1={padL} x2={W} y1={y(t)} y2={y(t)} stroke="var(--line)" strokeWidth={t === 0 ? 1.5 : 1} /><text x={padL - 6} y={y(t) + 4} textAnchor="end" fontSize="11" fill="var(--mute)">{shortMoney(t)}</text></g>)}
+        {groups.map((g, i) => {
+          const x0 = padL + i * gw + (gw - bw * series.length - 2 * (series.length - 1)) / 2;
+          return (
+            <g key={g.label} onMouseEnter={() => setHover(i)}>
+              <rect x={padL + i * gw} y={padT} width={gw} height={H - padT - padB} fill={hover === i ? "var(--rowAlt)" : "transparent"} />
+              {series.map((s, j) => { const v = g.values[s.key] || 0, top = Math.min(y(v), y(0)), h = Math.max(1, Math.abs(y(v) - y(0)));
+                return <rect key={s.key} x={x0 + j * (bw + 2)} y={top} width={bw} height={h} rx={Math.min(4, bw / 2)} fill={colorBySign ? (v >= 0 ? "var(--green)" : "var(--red)") : s.color} />; })}
+              {(groups.length <= 16 || i % Math.ceil(groups.length / 16) === 0) && <text x={padL + i * gw + gw / 2} y={H - 8} textAnchor="middle" fontSize="11" fill="var(--mute)">{g.label}</text>}
+            </g>
+          );
+        })}
+      </svg>
+      {hover != null && groups[hover] && (
+        <div style={{ position: "absolute", top: 24, left: `${Math.min(80, ((padL + hover * gw + gw) / W) * 100)}%`, background: C.card, border: `1px solid ${C.line}`, borderRadius: 6, padding: "6px 10px", fontSize: 12, pointerEvents: "none", boxShadow: "0 2px 8px rgba(0,0,0,.25)", whiteSpace: "nowrap" }}>
+          <b>{groups[hover].label}</b>
+          {series.map((s) => <div key={s.key} style={{ display: "flex", gap: 10 }}><span style={{ color: C.mute }}>{s.label}</span><span style={{ marginLeft: "auto" }}>{money(groups[hover].values[s.key] || 0)}</span></div>)}
+        </div>
+      )}
+    </div>
+  );
+}
+function LineChart({ points, height = 180, label }) {
+  const [hover, setHover] = useState(null);
+  const [ref, W] = useWidth();
+  const H = height, padL = 46, padB = 26, padT = 10;
+  const ticks = niceTicks(Math.min(0, ...points.map((p) => p.v)), Math.max(0, ...points.map((p) => p.v)));
+  const lo = ticks[0], hi = ticks[ticks.length - 1];
+  const x = (i) => padL + 14 + (points.length <= 1 ? (W - padL - 28) / 2 : (i / (points.length - 1)) * (W - padL - 42));
+  const y = (v) => padT + ((hi - v) / (hi - lo || 1)) * (H - padT - padB);
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }} onMouseLeave={() => setHover(null)}
+        onMouseMove={(e) => { const r = e.currentTarget.getBoundingClientRect(); const px = ((e.clientX - r.left) / r.width) * W; let best = 0; points.forEach((_, i) => { if (Math.abs(x(i) - px) < Math.abs(x(best) - px)) best = i; }); setHover(best); }}>
+        {ticks.map((t) => <g key={t}><line x1={padL} x2={W} y1={y(t)} y2={y(t)} stroke="var(--line)" strokeWidth={t === 0 ? 1.5 : 1} /><text x={padL - 6} y={y(t) + 4} textAnchor="end" fontSize="11" fill="var(--mute)">{shortMoney(t)}</text></g>)}
+        <polyline fill="none" stroke="var(--s1)" strokeWidth="2" points={points.map((p, i) => `${x(i)},${y(p.v)}`).join(" ")} />
+        {points.map((p, i) => <circle key={i} cx={x(i)} cy={y(p.v)} r={hover === i ? 5 : 3.5} fill="var(--s1)" stroke="var(--card)" strokeWidth="2" />)}
+        {hover != null && <line x1={x(hover)} x2={x(hover)} y1={padT} y2={H - padB} stroke="var(--mute)" strokeDasharray="3 3" />}
+        {points.map((p, i) => (points.length <= 16 || i % Math.ceil(points.length / 16) === 0) && <text key={"l" + i} x={x(i)} y={H - 8} textAnchor="middle" fontSize="11" fill="var(--mute)">{p.label}</text>)}
+      </svg>
+      {hover != null && <div style={{ position: "absolute", top: 8, left: `${Math.min(78, (x(hover) / W) * 100)}%`, background: C.card, border: `1px solid ${C.line}`, borderRadius: 6, padding: "6px 10px", fontSize: 12, pointerEvents: "none", whiteSpace: "nowrap" }}><b>{points[hover].label}</b> · {label} {money(points[hover].v)}</div>}
+    </div>
+  );
+}
+
+const statTile = (label, v, prev, color) => (
+  <div style={{ background: C.card, borderRadius: 10, padding: "14px 16px", boxShadow: "0 1px 6px rgba(0,0,0,0.15)", borderTop: `3px solid ${color}` }}>
+    <div style={{ fontSize: 11.5, color: C.mute, textTransform: "uppercase", letterSpacing: ".06em" }}>{label}</div>
+    <div style={{ fontFamily: "Georgia, serif", fontSize: 26, marginTop: 4, color: v > 0.005 ? C.green : v < -0.005 ? C.red : C.ink }}>{fmt(v)}</div>
+    {prev != null && <div style={{ fontSize: 11.5, color: C.mute, marginTop: 2 }}>{v - prev >= 0 ? "▲" : "▼"} {fmt(Math.abs(v - prev))} vs last saved week</div>}
+  </div>
+);
+
+function BookWeek({ t, label, prev, prevLabel, saved }) {
+  const clubs = bookClubs(t);
+  const line = (l, v, opts = {}) => <div style={{ display: "flex", padding: "5px 0", fontSize: 13, borderTop: opts.rule ? `1px solid ${C.line}` : "none", fontWeight: opts.bold ? 700 : 400 }}><span style={{ color: opts.bold ? C.ink : C.mute }}>{l}</span><span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums" }}>{money(v || 0)}</span></div>;
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+        <div style={{ fontFamily: "Georgia, serif", fontSize: 20 }}>{label ? `Week ${label}` : "This week"}</div>
+        <span style={{ color: C.mute, fontSize: 12.5 }}>{saved ? `saved ${t.savedAt ? new Date(t.savedAt).toLocaleDateString() : ""}` : "live — from the clubs' current weeks"}</span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
+        {statTile("Total", bookGrand(t), prev ? bookGrand(prev) : null, "var(--gold)")}
+        {statTile("Personal play", t.personalTotal || 0, prev ? prev.personalTotal : null, "var(--s1)")}
+        {statTile("Rake profit", t.rakeProfitTotal || 0, prev ? prev.rakeProfitTotal : null, "var(--s2)")}
+        {statTile("Staking · vig · misc", t.stakingVigMiscTotal || 0, prev ? prev.stakingVigMiscTotal : null, "var(--s3)")}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 3fr) minmax(260px, 2fr)", gap: 14, alignItems: "start" }}>
+        <Card title="By club">
+          {clubs.length ? <BarChart groups={clubs.map((c) => ({ label: c.name, values: { personal: c.personal, fee: c.fee } }))} series={[{ key: "personal", label: "Personal play", color: "var(--s1)" }, { key: "fee", label: "Rake profit", color: "var(--s2)" }]} /> : <div style={{ color: C.mute, fontSize: 13 }}>No club weeks loaded.</div>}
+          <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 8 }}>
+            <thead><tr><th style={{ ...th, textAlign: "left" }}>Club</th><th style={th}>Personal play</th><th style={th}>Rake profit</th><th style={th}>Total</th></tr></thead>
+            <tbody>{clubs.map((c) => <tr key={c.name} style={{ borderTop: `1px solid ${C.line}` }}><td style={tdL}><b>{c.name}</b> <span style={{ color: C.mute, fontSize: 11 }}>{bookLabel(c.period)}</span></td><td style={td}>{money(c.personal)}</td><td style={td}>{money(c.fee)}</td><td style={td}>{money(r2(c.personal + c.fee))}</td></tr>)}</tbody>
+          </table>
+        </Card>
+        <Card title="Staking, vig & misc">
+          {line("Makeup chopped profit", t.makeupChopTotal)}
+          {line("Action buys net", t.actionNetTotal)}
+          {line(`Crypto vig${t.priorWeekStart ? ` (${t.priorWeekStart.slice(5)} – ${(t.priorWeekEnd || "").slice(5)})` : ""}`, t.vigWeekTotal)}
+          {line("Misc P&L", t.miscWeekTotal)}
+          {line("Total", t.stakingVigMiscTotal, { rule: true, bold: true })}
+          <div style={{ fontSize: 12, color: C.mute, marginTop: 6 }}>Makeup still owed (open, not counted): <b style={{ color: C.goldDark }}>{fmt(t.makeupAccruedTotal || 0)}</b></div>
+          {(t.makeupRows || []).length + (t.actionRows || []).length > 0 && (
+            <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 10 }}>
+              <thead><tr><th style={{ ...th, textAlign: "left" }}>Player</th><th style={th}>Chop / net</th><th style={th}>Makeup added</th></tr></thead>
+              <tbody>
+                {(t.makeupRows || []).map((r) => <tr key={"m" + r.name} style={{ borderTop: `1px solid ${C.line}` }}><td style={tdL}>{r.name} <span style={{ color: C.mute, fontSize: 11 }}>stake</span></td><td style={td}>{money(r.chop)}</td><td style={td}>{fmt(r.accrued)}</td></tr>)}
+                {(t.actionRows || []).map((r) => <tr key={"a" + r.name} style={{ borderTop: `1px solid ${C.line}` }}><td style={tdL}>{r.name} <span style={{ color: C.mute, fontSize: 11 }}>action</span></td><td style={td}>{money(r.net)}</td><td style={td}>—</td></tr>)}
+              </tbody>
+            </table>
+          )}
+          {((t.vigRows || []).length + (t.miscRows || []).length) > 0 && <div style={{ marginTop: 10 }}>
+            {(t.vigRows || []).filter((r) => Math.abs(r.vig) > 0.005).map((r) => line(`Vig · ${r.name}`, r.vig))}
+            {(t.miscRows || []).map((r) => line(`Misc · ${r.category}`, r.amount))}
+          </div>}
+        </Card>
+      </div>
+      <Notes>
+        <div><b>Total</b> = personal play + rake profit + staking/vig/misc. <b>Personal play</b> is your own accounts across every club. <b>Rake profit</b> is your share of each club's margin (pool share, personal lines, fees paid to you). Staking counts only realized money (chop, action-buy net); makeup still owed is shown but not counted.</div>
+        <div>Vig and misc use the last completed Mon–Sun week. Save each week once the clubs are settled so it lands in History{prevLabel ? ` — compared here against ${prevLabel}` : ""}.</div>
+      </Notes>
+    </div>
+  );
+}
+
+function BookHistory({ weeks, labels, open, del }) {
+  if (!labels.length) return <Card title="No saved weeks yet"><div style={{ color: C.mute, fontSize: 13 }}>Use <b>Save this week</b> once a week is settled — it lands here with charts.</div></Card>;
+  let cum = 0;
+  const rows = labels.map((key) => { const w = weeks[key]; const g = bookGrand(w); cum = r2(cum + g); return { key, l: shortLabel(key), w, g, cum }; });
+  const best = rows.reduce((a, r) => (r.g > a.g ? r : a), rows[0]), worst = rows.reduce((a, r) => (r.g < a.g ? r : a), rows[0]);
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
+        {statTile(`Running total · ${rows.length} weeks`, cum, null, "var(--gold)")}
+        {statTile("Average week", r2(cum / rows.length), null, "var(--s1)")}
+        {statTile(`Best week · ${best.l}`, best.g, null, "var(--green)")}
+        {statTile(`Worst week · ${worst.l}`, worst.g, null, "var(--red)")}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))", gap: 14 }}>
+        <Card title="Weekly total"><BarChart groups={rows.map((r) => ({ label: r.l.slice(0, 5), values: { g: r.g } }))} series={[{ key: "g", label: "Total", color: "var(--gold)" }]} colorBySign /></Card>
+        <Card title="Running total"><LineChart points={rows.map((r) => ({ label: r.l.slice(0, 5), v: r.cum }))} label="running" /></Card>
+      </div>
+      <Card title="Where each week came from">
+        <BarChart groups={rows.map((r) => ({ label: r.l.slice(0, 5), values: { p: r.w.personalTotal || 0, f: r.w.rakeProfitTotal || 0, s: r.w.stakingVigMiscTotal || 0 } }))}
+          series={[{ key: "p", label: "Personal play", color: "var(--s1)" }, { key: "f", label: "Rake profit", color: "var(--s2)" }, { key: "s", label: "Staking · vig · misc", color: "var(--s3)" }]} />
+      </Card>
+      <Card title="Weeks">
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr><th style={{ ...th, textAlign: "left" }}>Week</th><th style={th}>Personal play</th><th style={th}>Rake profit</th><th style={th}>Staking · vig · misc</th><th style={th}>Total</th><th style={th}>Running</th><th style={th}></th></tr></thead>
+          <tbody>{[...rows].reverse().map((r, i) => (
+            <tr key={r.key} style={{ borderTop: `1px solid ${C.line}`, background: i % 2 ? C.rowAlt : "transparent" }}>
+              <td style={tdL}><button onClick={() => open(r.key)} style={{ border: "none", background: "none", color: C.goldDark, cursor: "pointer", fontWeight: 700, padding: 0, fontSize: "inherit" }}>{r.l}</button></td>
+              <td style={td}>{money(r.w.personalTotal || 0)}</td><td style={td}>{money(r.w.rakeProfitTotal || 0)}</td><td style={td}>{money(r.w.stakingVigMiscTotal || 0)}</td>
+              <td style={{ ...td, fontWeight: 700 }}>{money(r.g)}</td><td style={td}>{money(r.cum)}</td>
+              <td style={td}><button onClick={() => del(r.key)} title="Delete week" style={{ border: "none", background: "none", color: C.red, cursor: "pointer" }}>×</button></td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </Card>
     </div>
   );
 }
@@ -4562,7 +4795,8 @@ function computeBookTotals({ ft, ownerClubs, agent, tabs, persons }) {
   const stakingVigMiscTotal = r2(makeupChopTotal + actionNetTotal + vigWeekTotal + miscWeekTotal);
 
   return {
-    period: ft?.period || "",
+    period: ft?.period || (ocRows.find((o) => o.name === "Fish Tank") || ocRows[0] || {}).period || "",
+    grandTotal: r2(clubTotal + stakingVigMiscTotal),
     ftPersonal, ftFee, ocRows, ocPersonalTotal, ocFeeTotal, ocLabel, ocFeeLabel,
     myPlayTotal, myPlayNames, mcMargin, mcAdj,
     personalTotal, rakeProfitTotal, clubTotal,
@@ -4572,197 +4806,6 @@ function computeBookTotals({ ft, ownerClubs, agent, tabs, persons }) {
     stakingVigMiscTotal,
     hasFt: !!ft, hasAgent: !!agent,
   };
-}
-
-// Pure presentational — renders whatever `totals` object it's handed
-// (computeBookTotals' shape), whether that's the live, freshly-computed
-// week or a snapshot pulled back out of the saved-weeks history.
-function BookSummary({ totals: t, viewingSaved }) {
-  const row = (label, val, opts = {}) => (
-    <div style={{ display: "flex", padding: "6px 0", fontSize: 13.5, paddingLeft: opts.indent ? 16 : 0 }}>
-      <span style={{ color: opts.bold ? C.ink : C.mute, fontWeight: opts.bold ? 700 : 400 }}>{label}</span>
-      <span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums", fontWeight: opts.bold ? 700 : 500 }}>{money(val)}</span>
-    </div>
-  );
-  const siteLabel = (s) => (String(s || "").startsWith("My Clubs · ") ? s.slice("My Clubs · ".length) : s);
-  const sitesText = (sites) => (sites && sites.length ? ` (${sites.map(siteLabel).join(", ")})` : "");
-  const makeupRow = (g, opts = {}) => (
-    <div key={g.name} style={{ display: "flex", padding: "6px 0", fontSize: opts.bold ? 13.5 : 12.5, alignItems: "baseline", flexWrap: "wrap", rowGap: 2, borderTop: opts.bold ? "none" : `1px solid ${C.line}` }}>
-      <span style={{ color: opts.bold ? C.ink : C.mute, fontWeight: opts.bold ? 700 : 400 }}>{g.name}{!opts.bold ? sitesText(g.sites) : ""}</span>
-      <span style={{ marginLeft: "auto", display: "flex", gap: 18, fontVariantNumeric: "tabular-nums" }}>
-        <span>chop {money(g.chop)}</span>
-        <span>makeup accrued <b style={{ color: C.goldDark }}>{fmt(g.accrued)}</b></span>
-      </span>
-    </div>
-  );
-  const actionRow = (g, opts = {}) => (
-    <div key={g.name} style={{ display: "flex", padding: "6px 0", fontSize: opts.bold ? 13.5 : 12.5, alignItems: "baseline", flexWrap: "wrap", rowGap: 2, borderTop: opts.bold ? "none" : `1px solid ${C.line}` }}>
-      <span style={{ color: opts.bold ? C.ink : C.mute, fontWeight: opts.bold ? 700 : 400 }}>{g.name}{!opts.bold ? sitesText(g.sites) : ""}</span>
-      <span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums" }}>{money(g.net)}</span>
-    </div>
-  );
-
-  return (
-    <div>
-      {viewingSaved && (
-        <div style={{ marginBottom: 14, padding: "8px 12px", background: C.cream, borderRadius: 8, fontSize: 12.5, color: C.mute }}>
-          Viewing a saved week{t.savedAt ? ` · saved ${new Date(t.savedAt).toLocaleString()}` : ""} — not live data. Switch to "Live (current data)" above to see what's currently loaded.
-        </div>
-      )}
-
-      <div style={{ marginBottom: 14 }}>
-        <Card title="Ak's net gain/loss" right={<Pill tone="gold">headline</Pill>}>
-          {row("Personal play (Fish Tank + owner clubs + My Clubs)", t.personalTotal)}
-          {row("Rake generation (ClubGG fee/margin profit)", t.rakeProfitTotal)}
-          <div style={{ borderTop: `1px solid ${C.line}`, margin: "10px 0 4px" }} />
-          {row("TOTAL", t.clubTotal, { bold: true })}
-          <div style={{ color: C.mute, fontSize: 11, marginTop: 8 }}>Staking, vig, and misc P&L are tracked separately below and not counted in this total. Use "+ Save this week" above to keep this week's number on record.</div>
-        </Card>
-      </div>
-
-      <div style={{ marginBottom: 14 }}>
-        <Card title="Total club weekly P&L">
-          <div style={{ color: C.mute, fontSize: 12, marginBottom: 8 }}>Personal play + fee margins only — staking (backed books / deal books, chop, makeup) is tracked separately in Tabs → Staking and excluded here.</div>
-          {row("TOTAL", t.clubTotal, { bold: true })}
-          <div style={{ borderTop: `1px solid ${C.line}`, margin: "10px 0 4px" }} />
-          <div style={{ fontWeight: 700, fontSize: 13, marginTop: 6, marginBottom: 2 }}>Personal play</div>
-          {row(`All in Fish Tank${t.period ? ` · ${t.period}` : ""}`, t.ftPersonal, { indent: true })}
-          {!t.hasFt && <div style={{ color: C.mute, fontSize: 11.5, paddingLeft: 16 }}>No Fish Tank week loaded.</div>}
-          {row(t.ocLabel, t.ocPersonalTotal, { indent: true })}
-          {t.ocRows.length === 0 && <div style={{ color: C.mute, fontSize: 11.5, paddingLeft: 16 }}>No owner club week loaded.</div>}
-          {row(`Remaining clubs${t.myPlayNames.length ? ` (${t.myPlayNames.join(", ")})` : ""}`, t.myPlayTotal, { indent: true })}
-          {!t.hasAgent && <div style={{ color: C.mute, fontSize: 11.5, paddingLeft: 16 }}>No My Clubs week loaded.</div>}
-          {row("Personal play total", t.personalTotal, { bold: true })}
-          <div style={{ borderTop: `1px solid ${C.line}`, margin: "10px 0 4px" }} />
-          <div style={{ fontWeight: 700, fontSize: 13, marginTop: 6, marginBottom: 2 }}>Fee margin profits</div>
-          {row(`All in Fish Tank ownership share${t.period ? ` · ${t.period}` : ""}`, t.ftFee, { indent: true })}
-          {row(t.ocFeeLabel, t.ocFeeTotal, { indent: true })}
-          {row("Personal DL margin", t.mcMargin, { indent: true })}
-          {row("Fee margin total", t.rakeProfitTotal, { bold: true })}
-        </Card>
-      </div>
-
-      {t.ocRows.length > 1 && (
-        <div style={{ marginBottom: 14 }}>
-          <Card title="Owner clubs — by club">
-            {t.ocRows.map((o) => (
-              <div key={o.name} style={{ borderTop: `1px solid ${C.line}`, padding: "6px 0", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 12.5 }}>
-                <b>{o.name}</b><span style={{ color: C.mute }}>{o.period}</span>
-                <span style={{ marginLeft: "auto" }}>personal play {money(o.personal)} · fee margin {money(o.fee)}</span>
-              </div>
-            ))}
-          </Card>
-        </div>
-      )}
-
-      <div style={{ marginBottom: 14 }}>
-        <Card title="Not included above — tracked separately">
-          <div style={{ color: C.mute, fontSize: 12, marginBottom: 8 }}>Staking and My Clubs' general adjustments aren't part of the club P&L above — shown here for reference only, grouped per player across every site (Fish Tank, owner clubs, My Clubs) that fed them this week. "Makeup accrued" is just the new makeup that piled up this week (a losing session), not the running balance — not a loss yet, just an open marker until a stake ends still in the red (Tabs → Staking → End stake).</div>
-
-          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>Makeup deals</div>
-          {makeupRow({ name: "TOTAL", chop: t.makeupChopTotal, accrued: t.makeupAccruedTotal }, { bold: true })}
-          {t.makeupRows.length === 0
-            ? <div style={{ color: C.mute, fontSize: 11.5, padding: "4px 0" }}>No makeup-deal activity this week.</div>
-            : t.makeupRows.map((g) => makeupRow(g))}
-
-          <div style={{ fontWeight: 700, fontSize: 13, marginTop: 14, marginBottom: 2 }}>Action buys</div>
-          {actionRow({ name: "TOTAL", net: t.actionNetTotal }, { bold: true })}
-          {t.actionRows.length === 0
-            ? <div style={{ color: C.mute, fontSize: 11.5, padding: "4px 0" }}>No action-buy activity this week.</div>
-            : t.actionRows.map((g) => actionRow(g))}
-
-          <div style={{ borderTop: `1px solid ${C.line}`, margin: "12px 0 4px" }} />
-          {row("My Clubs — general adjustments", t.mcAdj)}
-        </Card>
-      </div>
-
-      <div style={{ marginBottom: 14 }}>
-        <Card title="Vig — prior week">
-          <div style={{ color: C.mute, fontSize: 12, marginBottom: 8 }}>Crypto transaction vig logged in Tabs → Vig, for the week of {t.priorWeekStart} – {t.priorWeekEnd}.</div>
-          {t.vigRows.length === 0
-            ? <div style={{ color: C.mute, fontSize: 12.5 }}>No crypto transactions logged that week.</div>
-            : (
-              <>
-                {row("TOTAL", t.vigWeekTotal, { bold: true })}
-                <div style={{ display: "flex", gap: 16, padding: "2px 0 10px", fontSize: 12, color: C.mute }}>
-                  <span>gains {fmt(t.vigGains)}</span>
-                  <span>losses {fmt(t.vigLosses)}</span>
-                </div>
-                {t.vigRows.map((r) => (
-                  <div key={r.name} style={{ display: "flex", padding: "4px 0", fontSize: 12.5, borderTop: `1px solid ${C.line}` }}>
-                    <span style={{ color: C.mute }}>{r.name}</span>
-                    <span style={{ marginLeft: "auto", fontWeight: 600, color: r.vig > 0.005 ? C.green : r.vig < -0.005 ? C.red : C.ink }}>{fmt(r.vig)}</span>
-                  </div>
-                ))}
-              </>
-            )}
-        </Card>
-      </div>
-
-      <div>
-        <Card title="Misc P&L — prior week">
-          <div style={{ color: C.mute, fontSize: 12, marginBottom: 8 }}>Tabs → Misc P&L entries logged for the week of {t.priorWeekStart} – {t.priorWeekEnd}.</div>
-          {t.miscRows.length === 0
-            ? <div style={{ color: C.mute, fontSize: 12.5 }}>No misc P&L entries logged that week.</div>
-            : (
-              <>
-                {row("TOTAL", t.miscWeekTotal, { bold: true })}
-                {t.miscRows.map((r) => (
-                  <div key={r.category} style={{ display: "flex", padding: "4px 0", fontSize: 12.5, borderTop: `1px solid ${C.line}` }}>
-                    <span style={{ color: C.mute }}>{r.category}</span>
-                    <span style={{ marginLeft: "auto", fontWeight: 600, color: r.amount > 0.005 ? C.green : r.amount < -0.005 ? C.red : C.ink }}>{fmt(r.amount)}</span>
-                  </div>
-                ))}
-              </>
-            )}
-        </Card>
-      </div>
-    </div>
-  );
-}
-
-function BookChecklist({ items, save, persons }) {
-  const [draft, setDraft] = useState({ player: "", note: "", due: today() });
-  const addItem = () => {
-    if (!draft.note.trim()) return;
-    save([...items, { id: uid(), player: draft.player.trim(), note: draft.note.trim(), due: draft.due || today(), done: false }]);
-    setDraft({ player: "", note: "", due: today() });
-  };
-  const toggleDone = (id) => save(items.map((x) => (x.id === id ? { ...x, done: !x.done } : x)));
-  const removeItem = (id) => save(items.filter((x) => x.id !== id));
-  const clearDone = () => save(items.filter((x) => !x.done));
-  const open = [...items.filter((x) => !x.done)].sort((a, b) => (a.due || "").localeCompare(b.due || ""));
-  const done = items.filter((x) => x.done);
-  const allNames = [...new Set(persons.map((p) => p.name))].sort((a, b) => a.localeCompare(b));
-  const isOverdue = (x) => !x.done && x.due && x.due < today();
-
-  return (
-    <div>
-      <div style={{ marginBottom: 14 }}>
-        <Card title="New reminder">
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-            <input list="book-player-names" placeholder="Player (optional)" value={draft.player} onChange={(e) => setDraft({ ...draft, player: e.target.value })} style={{ ...inputS, width: 160 }} />
-            <datalist id="book-player-names">{allNames.map((n) => <option key={n} value={n} />)}</datalist>
-            <input placeholder="Reminder…" value={draft.note} onChange={(e) => setDraft({ ...draft, note: e.target.value })} style={{ ...inputS, flex: 1, minWidth: 160 }} onKeyDown={(e) => { if (e.key === "Enter") addItem(); }} />
-            {dateInput(draft.due, (v) => setDraft({ ...draft, due: v }))}
-            <Btn tone="gold" small onClick={addItem} disabled={!draft.note.trim()}>+ Add</Btn>
-          </div>
-        </Card>
-      </div>
-      <Card title={`Reminders${open.length ? ` · ${open.length} open` : ""}`} right={done.length > 0 ? <Btn tone="ghost" small onClick={clearDone}>Clear checked ({done.length})</Btn> : null}>
-        {items.length === 0 && <div style={{ color: C.mute, fontSize: 13 }}>No reminders yet — add one above.</div>}
-        {[...open, ...done].map((x) => (
-          <div key={x.id} style={{ display: "flex", alignItems: "center", gap: 8, borderTop: `1px solid ${C.line}`, padding: "7px 0", fontSize: 13, opacity: x.done ? 0.5 : 1 }}>
-            <input type="checkbox" checked={!!x.done} onChange={() => toggleDone(x.id)} />
-            {x.player && <span style={{ fontWeight: 600 }}>{x.player}</span>}
-            <span style={{ textDecoration: x.done ? "line-through" : "none" }}>{x.note}</span>
-            <span style={{ marginLeft: "auto", fontSize: 11, color: isOverdue(x) ? C.red : C.mute, fontWeight: isOverdue(x) ? 700 : 400, whiteSpace: "nowrap" }}>{x.due}{isOverdue(x) ? " · overdue" : ""}</span>
-            {iconBtn("×", () => removeItem(x.id), C.red, "Remove")}
-          </div>
-        ))}
-      </Card>
-    </div>
-  );
 }
 
 function TabsLedger({ clubs }) {
