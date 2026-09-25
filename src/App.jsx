@@ -1844,6 +1844,33 @@ function ftRowsForNames(ft, nameSet) {
   });
   return rows;
 }
+// rows for a set of usernames out of an owner club week (All American, Honey
+// Pot, or any future owner club) — same shape as ftRowsForNames, so it merges
+// straight into the same report list. `oc` is one entry from
+// loadAllOwnerClubModels(): { model, period, cfg, club }.
+function aaRowsForNames(oc, nameSet) {
+  if (!oc || !oc.model) return [];
+  const rows = [];
+  const label = `${oc.club?.name || "Owner club"}${oc.period ? ` (${oc.period})` : ""}`;
+  const clubKey = oc.club?.id || label;
+  oc.model.entities.forEach((e) => {
+    (e.members || []).forEach((mm) => {
+      if (nameSet.has(mm.name.trim().toLowerCase())) {
+        // Members don't carry a pre-computed settlement (only the entity
+        // aggregate does) — but it's additive: entity settlement = net − trCut
+        // = (pnl + tipback) − trCut summed across members, so each member's
+        // own slice is exactly pnl + tipback − trCut.
+        rows.push({ id: "oc-" + clubKey + "-" + mm.memberId, clubName: label, name: mm.name, customDeal: `TB ${mm.tbPct}%${mm.tr ? ` · TR ${mm.tr}%` : ""}`, pnl: mm.pnl, tips: mm.fee, tipback: mm.tipback, settlement: r2(mm.pnl + mm.tipback - mm.trCut), margin: 0, played: true });
+      }
+    });
+  });
+  (oc.model.backedEntities || []).forEach((e) => {
+    if (nameSet.has(e.name.trim().toLowerCase())) {
+      rows.push({ id: "oc-" + clubKey + "-" + e.key, clubName: label, name: e.name, customDeal: e.dealType === "action" ? `action buy ${e.actionPct}%` : `makeup · RB ${e.rb}%`, pnl: e.pnl, tips: e.fee, tipback: e.rbCredit, settlement: e.settlement, margin: 0, played: true });
+    }
+  });
+  return rows;
+}
 // Persons (Tabs → Player data): one person, many usernames across sites.
 // An alias with a site only matches that site; a blank site matches anywhere.
 const normPersons = (persons) => (persons || []).map((p) => {
@@ -1887,7 +1914,7 @@ const FORMULA_HELP = "pnl · tips · tb · tr · tipback (tips×tb%) · net (pnl
 const DEFAULT_FORMULA = "net - tr/100*net";
 const NEW_CLUB = (name) => ({
   id: uid(), name, conv: 100, actionBase: "net", useFormula: false, formula: DEFAULT_FORMULA,
-  clubTB: 80, clubAction: 0,
+  clubTB: 80, clubAction: 0, hasBBJ: false,
   players: [],
 });
 // Older saves used toggles + a separate rebate; fold everything into tb/tr.
@@ -1934,7 +1961,12 @@ function compileFormula(expr) {
   return (v) => fn(v.pnl, v.tips, v.tb, v.tr, v.rebate, v.tipback, v.net, v.gross, Math.min, Math.max, Math.abs, Math.round);
 }
 
-function settleLine(pnl, tips, d, club, conv) {
+// bbj (bad beat jackpot deduction, club-currency, defaults to 0) is kept
+// completely out of tipback/net/actionCut — it never feeds the TR base (or a
+// custom formula's inputs) — and is only taken off the settlement itself,
+// after everything else including TR/formula, then converted like the rest.
+function settleLine(pnl, tips, d, club, conv, bbj) {
+  bbj = bbj || 0;
   const tipback = (tips * (d.tb || 0)) / 100;
   const net = pnl + tipback;
   const gross = pnl + tips;
@@ -1944,11 +1976,11 @@ function settleLine(pnl, tips, d, club, conv) {
     try { s = club._fn({ pnl, tips, tb: d.tb || 0, tr, rebate: 0, tipback, net, gross }); }
     catch (e) { s = net; }
     if (!isFinite(s)) s = net;
-    return { tipback, net, actionCut: net - s, settlement: s * conv };
+    return { tipback, net, actionCut: net - s, settlement: (s - bbj) * conv };
   }
   const trBase = club.actionBase === "pnl" ? pnl : club.actionBase === "gross" ? gross : net;
   const actionCut = (trBase * tr) / 100;
-  return { tipback, net, actionCut, settlement: (net - actionCut) * conv };
+  return { tipback, net, actionCut, settlement: (net - actionCut - bbj) * conv };
 }
 
 function computeAgent(acfg, week) {
@@ -1966,14 +1998,21 @@ function computeAgent(acfg, week) {
     const players = club.players.map((p) => {
       const e = entries[p.id] || {};
       const pnl = +e.pnl || 0, tips = +e.tips || 0;
-      const played = pnl !== 0 || tips !== 0;
+      // BBJ only applies where the club is flagged for it — a stray value left
+      // over from before the toggle was on (or after it's switched off) is
+      // ignored rather than silently still being deducted.
+      const bbj = club.hasBBJ ? (+e.bbj || 0) : 0;
+      const played = pnl !== 0 || tips !== 0 || bbj !== 0;
       const isMine = myAccSet.has(p.name.trim().toLowerCase());
       const clubDeal = { tb: club.clubTB || 0, tr: club.clubAction || 0 };
       const eff = isMine ? clubDeal : p; // your own accounts ride the club's deal automatically
-      const mine = settleLine(pnl, tips, eff, ctx, conv);
+      // BBJ is charged to the player and passed straight through to the club
+      // (you're just the middleman on it), so it comes off both sides of the
+      // settlement equally — your margin on this player is unaffected by it.
+      const mine = settleLine(pnl, tips, eff, ctx, conv, bbj);
       // what the club pays you for this player's action
-      const clubSide = settleLine(pnl, tips, clubDeal, ctx, conv);
-      return { ...p, tb: eff.tb, tr: eff.tr, isMine, clubId: club.id, clubName: club.name, pnl, tips, played,
+      const clubSide = settleLine(pnl, tips, clubDeal, ctx, conv, bbj);
+      return { ...p, tb: eff.tb, tr: eff.tr, isMine, clubId: club.id, clubName: club.name, pnl, tips, bbj, played,
         tipback: mine.tipback, net: mine.net, actionCut: mine.actionCut * conv,
         settlement: mine.settlement, clubValue: clubSide.settlement,
         margin: clubSide.settlement - mine.settlement,
@@ -2032,7 +2071,8 @@ function AgentClubs({ theme }) {
   const [exportData, setExportData] = useState(null);
   const [ft, setFt] = useState(null);
   const [persons, setPersons] = useState([]);
-  useEffect(() => { (async () => { setFt(await loadFishTankModel()); setPersons(await loadPersons()); })(); }, []);
+  const [ownerClubs, setOwnerClubs] = useState([]);
+  useEffect(() => { (async () => { setFt(await loadFishTankModel()); setPersons(await loadPersons()); setOwnerClubs(await loadAllOwnerClubModels()); })(); }, []);
 
   useEffect(() => {
     (async () => {
@@ -2115,7 +2155,7 @@ function AgentClubs({ theme }) {
           </div>
         )}
         {week && tab === "entry" && <AgentEntry model={model} setEntry={setEntry} setAdjs={setAdjs} week={week} acfg={acfg} />}
-        {week && tab === "summary" && <AgentSummary model={model} wk={wk} setExportData={setExportData} acfg={acfg} up={up} ft={ft} persons={persons} />}
+        {week && tab === "summary" && <AgentSummary model={model} wk={wk} setExportData={setExportData} acfg={acfg} up={up} ft={ft} persons={persons} ownerClubs={ownerClubs} />}
         {tab === "clubs" && <AgentClubsSetup acfg={acfg} up={up} />}
       </div>
     </div>
@@ -2129,7 +2169,7 @@ function AgentEntry({ model, setEntry, setAdjs, week, acfg }) {
   return (
     <div>
       <div style={{ color: C.mute, fontSize: 12.5, marginBottom: 12 }}>
-        Enter each player's <b>P&L</b> and <b>Tips</b> in club currency; blank = no play. <span style={{ color: C.green, fontWeight: 700 }}>Green</span> = you pay them · <span style={{ color: C.red, fontWeight: 700 }}>red</span> = they pay you. <b>Margin</b> is what you keep after the club pays you for that player.
+        Enter each player's <b>P&L</b> and <b>Tips</b> in club currency; blank = no play. <span style={{ color: C.green, fontWeight: 700 }}>Green</span> = you pay them · <span style={{ color: C.red, fontWeight: 700 }}>red</span> = they pay you. <b>Margin</b> is what you keep after the club pays you for that player. Clubs with the <b>BBJ deduction</b> toggle on (Clubs & deals) get a <b>BBJ</b> column — a bad-beat-jackpot amount charged to the player and passed through to the club, kept separate from P&L/tips and untouched by TB/TR, taken off the settlement last.
         {locked && <span style={{ color: C.goldDark, fontWeight: 700 }}> 🔒 This week is locked — unlock it above to edit.</span>}
       </div>
       {model.clubs.filter((c) => c.players.length > 0).map((c) => (
@@ -2148,6 +2188,7 @@ function AgentEntry({ model, setEntry, setAdjs, week, acfg }) {
               <th style={{ ...th, textAlign: "left" }}>Player</th>
               <th style={{ ...th, textAlign: "left" }}>Deal</th>
               <th style={th}>P&L</th><th style={th}>Tips</th>
+              {c.hasBBJ && <th style={th} title="Bad beat jackpot — charged to the player, passed through to the club, taken off the settlement last.">BBJ</th>}
               <th style={th}>Tipback</th><th style={th}>Settlement</th><th style={th}>Your margin</th>
             </tr></thead>
             <tbody>
@@ -2157,6 +2198,7 @@ function AgentEntry({ model, setEntry, setAdjs, week, acfg }) {
                   <td style={{ ...tdL, color: C.mute, fontSize: 11.5 }}>{dealLabel(p)}</td>
                   <td style={td}><NumInput width={92} value={(week.entries[p.id] || {}).pnl ?? ""} onChange={(v) => setEntry(p.id, "pnl", v)} disabled={locked} /></td>
                   <td style={td}><NumInput width={82} value={(week.entries[p.id] || {}).tips ?? ""} onChange={(v) => setEntry(p.id, "tips", v)} disabled={locked} /></td>
+                  {c.hasBBJ && <td style={td}><NumInput width={82} value={(week.entries[p.id] || {}).bbj ?? ""} onChange={(v) => setEntry(p.id, "bbj", v)} disabled={locked} /></td>}
                   <td style={td}>{p.played ? fmt(p.tipback) : "—"}</td>
                   <td style={td}>{p.played ? money(p.settlement) : "—"}</td>
                   <td style={td}>{p.played ? money(p.margin) : "—"}</td>
@@ -2189,13 +2231,14 @@ function AgentEntry({ model, setEntry, setAdjs, week, acfg }) {
   );
 }
 
-function AgentSummary({ model, wk, setExportData, acfg, up, ft, persons }) {
+function AgentSummary({ model, wk, setExportData, acfg, up, ft, persons, ownerClubs }) {
   const t = model.totals;
   const active = model.clubs.filter((c) => c.active);
   const [reportSel, setReportSel] = useState("");
   const bundled = new Set(persons.flatMap((p) => p.usernames.map((u) => u.trim().toLowerCase())));
   const ftNames = ft ? [...new Set(ft.model.entities.flatMap((e) => e.type === "backed" ? [e.name] : e.members.map((m) => m.name)))] : [];
-  const rawNames = [...new Set([...model.allPlayers.map((p) => p.name.trim()), ...ftNames.map((n) => n.trim())])]
+  const ocNames = (ownerClubs || []).flatMap((oc) => (oc.model.entities || []).flatMap((e) => (e.members || []).map((m) => m.name)).concat((oc.model.backedEntities || []).map((e) => e.name)));
+  const rawNames = [...new Set([...model.allPlayers.map((p) => p.name.trim()), ...ftNames.map((n) => n.trim()), ...ocNames.map((n) => n.trim())])]
     .filter((n) => !bundled.has(n.toLowerCase())).sort((a, b) => a.localeCompare(b));
 
   // resolve selection → username set + display name
@@ -2208,10 +2251,11 @@ function AgentSummary({ model, wk, setExportData, acfg, up, ft, persons }) {
   }
   const mcRows = model.allPlayers.filter((p) => nameSet.has(p.name.trim().toLowerCase()) && p.played);
   const ftRows = ftRowsForNames(ft, nameSet);
+  const aaRows = (ownerClubs || []).flatMap((oc) => aaRowsForNames(oc, nameSet));
   // clubs owned by this person also fold into their report (sign flipped: positive = you pay them)
   const clubRows = model.clubs.filter((c) => c.active && (c.owner || "").trim() && (nameSet.has(c.owner.trim().toLowerCase()) || c.owner.trim().toLowerCase() === reportLabel.toLowerCase()))
     .map((c) => ({ id: "club-" + c.id, clubName: c.name, name: c.owner, customDeal: "club settlement", pnl: c.pnl, tips: c.tips, tipback: 0, settlement: -c.clubSettlement, margin: 0, played: true }));
-  const reportRows = [...ftRows, ...mcRows, ...clubRows];
+  const reportRows = [...ftRows, ...aaRows, ...mcRows, ...clubRows];
   const reportTotal = reportRows.reduce((a, p) => a + p.settlement, 0);
   // my play + fish tank side for the total card
   const myAcc = new Set((acfg.myAccounts || []).map((n) => n.trim().toLowerCase()).filter(Boolean));
@@ -2225,7 +2269,7 @@ function AgentSummary({ model, wk, setExportData, acfg, up, ft, persons }) {
       <span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums", fontWeight: opts.bold ? 700 : 500 }}>{money(val)}</span>
     </div>
   );
-  const copyRows = (title, rows) => setExportData({ title, text: toTSV(["Club", "Player", "Deal", "P&L", "Tips", "Tipback", "Settlement", "Your margin"], rows.map((p) => [p.clubName, p.name, p.customDeal || dealLabel(p), p.pnl.toFixed(2), p.tips.toFixed(2), p.tipback.toFixed(2), p.settlement.toFixed(2), (p.margin || 0).toFixed(2)])) });
+  const copyRows = (title, rows) => setExportData({ title, text: toTSV(["Club", "Player", "Deal", "P&L", "Tips", "BBJ", "Tipback", "Settlement", "Your margin"], rows.map((p) => [p.clubName, p.name, p.customDeal || dealLabel(p), p.pnl.toFixed(2), p.tips.toFixed(2), (p.bbj || 0).toFixed(2), p.tipback.toFixed(2), p.settlement.toFixed(2), (p.margin || 0).toFixed(2)])) });
 
   return (
     <div>
@@ -2290,7 +2334,7 @@ function AgentSummary({ model, wk, setExportData, acfg, up, ft, persons }) {
                     <td style={{ ...tdL, fontWeight: 600 }}>{p.clubName}{p.name && p.name.toLowerCase() !== reportLabel.toLowerCase() ? <span style={{ color: C.mute, fontWeight: 400, fontSize: 11 }}> · {p.name}</span> : null}</td>
                     <td style={{ ...tdL, color: C.mute, fontSize: 12 }}>{p.customDeal || dealLabel(p)}</td>
                     <td style={td}>P&L {fmt(p.pnl)}</td>
-                    <td style={td}>tips {fmt(p.tips)}</td>
+                    <td style={td}>tips {fmt(p.tips)}{p.bbj ? ` · bbj ${fmt(p.bbj)}` : ""}</td>
                     <td style={td}>{money(p.settlement)}</td>
                   </tr>
                 ))}
@@ -2318,7 +2362,7 @@ function AgentSummary({ model, wk, setExportData, acfg, up, ft, persons }) {
                   <td style={{ ...tdL, fontWeight: 600 }}>{p.name}</td>
                   <td style={{ ...tdL, color: C.mute, fontSize: 12 }}>{p.clubName}</td>
                   <td style={td}>P&L {fmt(p.pnl)}</td>
-                  <td style={td}>tips {fmt(p.tips)}</td>
+                  <td style={td}>tips {fmt(p.tips)}{p.bbj ? ` · bbj ${fmt(p.bbj)}` : ""}</td>
                   <td style={td}>{money(p.settlement)}</td>
                 </tr>
               ))}
@@ -2340,7 +2384,7 @@ function AgentSummary({ model, wk, setExportData, acfg, up, ft, persons }) {
                   <td style={{ ...tdL, fontWeight: 600, width: "24%" }}>{p.name}</td>
                   <td style={{ ...tdL, color: C.mute, fontSize: 12 }}>{dealLabel(p)}</td>
                   <td style={td}>P&L {fmt(p.pnl)}</td>
-                  <td style={td}>tips {fmt(p.tips)}</td>
+                  <td style={td}>tips {fmt(p.tips)}{p.bbj ? ` · bbj ${fmt(p.bbj)}` : ""}</td>
                   <td style={td}>{money(p.settlement)}</td>
                   <td style={td}>margin {money(p.margin)}</td>
                 </tr>
@@ -2357,8 +2401,8 @@ function AgentSummary({ model, wk, setExportData, acfg, up, ft, persons }) {
 }
 
 // ———— Clubs & deals: inline fields, toggles, club-side revenue ————
-const Toggle = ({ on, onClick, label }) => (
-  <button onClick={onClick} style={{
+const Toggle = ({ on, onClick, label, title }) => (
+  <button onClick={onClick} title={title} style={{
     border: `1px solid ${on ? C.goldDark : C.line}`, background: on ? C.gold : C.surface,
     color: on ? "var(--onGold)" : C.mute, borderRadius: 12, padding: "2px 10px",
     fontSize: 11, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>{label}</button>
@@ -2479,6 +2523,7 @@ function AgentClubsSetup({ acfg, up }) {
                 {TR_BASES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
               </select>
               <Toggle on={!!c.useFormula} onClick={() => setClub(c.id, { useFormula: !c.useFormula, formula: c.formula || DEFAULT_FORMULA })} label="custom formula" />
+              <Toggle on={!!c.hasBBJ} onClick={() => setClub(c.id, { hasBBJ: !c.hasBBJ })} label="BBJ deduction" title="Bad beat jackpot: a per-player amount entered on Weekly entry, charged to the player and passed straight through to the club — separate from P&L/tips, untouched by TB/TR/formula, and taken off the settlement last." />
               <button onClick={() => delClub(c.id)} style={{ marginLeft: "auto", border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 13 }}>× delete club</button>
             </div>
 
@@ -2557,22 +2602,23 @@ function playerSheetRows(ws, rows, withClub) {
     xText(r.getCell(3), withClub ? (p.customDeal || dealLabel(p)) : "", { mute: true });
     xMoney(r.getCell(4), p.pnl, { colorSign: false });
     xMoney(r.getCell(5), p.tips, { colorSign: false });
-    xMoney(r.getCell(6), p.tipback, { colorSign: false });
-    xMoney(r.getCell(7), p.settlement);
-    xMoney(r.getCell(8), p.margin || 0);
-    if (i % 2 === 1) for (let j = 1; j <= 8; j++) r.getCell(j).fill = fillOf(XLC.rowAlt);
+    xMoney(r.getCell(6), p.bbj || 0, { colorSign: false });
+    xMoney(r.getCell(7), p.tipback, { colorSign: false });
+    xMoney(r.getCell(8), p.settlement);
+    xMoney(r.getCell(9), p.margin || 0);
+    if (i % 2 === 1) for (let j = 1; j <= 9; j++) r.getCell(j).fill = fillOf(XLC.rowAlt);
   });
   const tr = ws.addRow([]);
   xText(tr.getCell(1), "TOTAL", { bold: true });
-  xMoney(tr.getCell(7), rows.reduce((a, p) => a + p.settlement, 0), { bold: true });
-  xMoney(tr.getCell(8), rows.reduce((a, p) => a + (p.margin || 0), 0), { bold: true });
-  for (let j = 1; j <= 8; j++) tr.getCell(j).fill = fillOf(XLC.cream);
+  xMoney(tr.getCell(8), rows.reduce((a, p) => a + p.settlement, 0), { bold: true });
+  xMoney(tr.getCell(9), rows.reduce((a, p) => a + (p.margin || 0), 0), { bold: true });
+  for (let j = 1; j <= 9; j++) tr.getCell(j).fill = fillOf(XLC.cream);
 }
-const AG_HEAD = ["Club", "Player", "Deal", "P&L", "Tips", "Tipback", "Settlement", "Your margin"];
+const AG_HEAD = ["Club", "Player", "Deal", "P&L", "Tips", "BBJ", "Tipback", "Settlement", "Your margin"];
 async function downloadPlayerExcel(name, rows, wk) {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet(safeSheetName(name, wb));
-  [18, 18, 22, 12, 12, 12, 13, 13].forEach((w, i) => (ws.getColumn(i + 1).width = w));
+  [18, 18, 22, 12, 12, 12, 12, 13, 13].forEach((w, i) => (ws.getColumn(i + 1).width = w));
   xTitle(ws, `${name} — ${wk}`);
   xHeader(ws, AG_HEAD, 3);
   playerSheetRows(ws, rows, true);
@@ -2607,21 +2653,21 @@ async function downloadAgentWorkbook(model, wk) {
   });
   model.umbrellas.filter((u) => u.played.length > 0).forEach((u) => {
     const w2 = wb.addWorksheet(safeSheetName(u.name, wb));
-    [18, 18, 22, 12, 12, 12, 13, 13].forEach((w, i) => (w2.getColumn(i + 1).width = w));
+    [18, 18, 22, 12, 12, 12, 12, 13, 13].forEach((w, i) => (w2.getColumn(i + 1).width = w));
     xTitle(w2, `${u.name} (umbrella) — ${wk}`);
     xHeader(w2, AG_HEAD, 3);
     playerSheetRows(w2, u.played, true);
   });
   active.forEach((c) => {
     const w2 = wb.addWorksheet(safeSheetName(c.name, wb));
-    [18, 22, 12, 12, 12, 12, 13, 13].forEach((w, i) => (w2.getColumn(i + 1).width = w));
+    [18, 22, 12, 12, 12, 12, 12, 13, 13].forEach((w, i) => (w2.getColumn(i + 1).width = w));
     xTitle(w2, `${c.name} — ${wk}`);
-    xHeader(w2, ["Player", "Deal", "", "P&L", "Tips", "Tipback", "Settlement", "Your margin"], 3);
+    xHeader(w2, ["Player", "Deal", "", "P&L", "Tips", "BBJ", "Tipback", "Settlement", "Your margin"], 3);
     playerSheetRows(w2, c.playersC.filter((p) => p.played), false);
-    if (c.clubAdj !== 0) { const ar = w2.addRow([]); xText(ar.getCell(1), "Club adjustments", { mute: true }); xMoney(ar.getCell(7), c.clubAdj); }
+    if (c.clubAdj !== 0) { const ar = w2.addRow([]); xText(ar.getCell(1), "Club adjustments", { mute: true }); xMoney(ar.getCell(8), c.clubAdj); }
     const cr = w2.addRow([]);
     xText(cr.getCell(1), "CLUB SETTLEMENT (you ↔ club)", { bold: true });
-    xMoney(cr.getCell(7), c.clubSettlement, { bold: true });
+    xMoney(cr.getCell(8), c.clubSettlement, { bold: true });
   });
   await saveWb(wb, `MyClubs_${wk.replace(/[^\d]/g, "_").replace(/^_+|_+$/g, "") || "week"}.xlsx`);
 }
@@ -4878,6 +4924,7 @@ function computeStaking(data, cps, live, persons) {
     const akPct = deal.akChopPct ?? 50;
     const settle = (net, pnl, held, unstaked, when, refId, label) => {
       let recovered = 0, excess = 0, akChop = 0, playerChop = 0;
+      const makeupBefore = makeup;
       if (deal.type === "makeup") {
         if (net < 0) makeup = r2(makeup - net);
         else { recovered = Math.min(net, makeup); makeup = r2(makeup - recovered); excess = net - recovered; akChop = r2(excess * akPct / 100); playerChop = r2(excess - akChop); }
@@ -4886,7 +4933,7 @@ function computeStaking(data, cps, live, persons) {
       const playerEnt = unstaked + playerChop;
       const tab = r2(held - playerEnt);
       if (Math.abs(tab) > 0.005) derived.push({ id: "stk-" + refId, date: when, cpId: deal.cpId, amount: tab, note: label, source: "staking", dealId: deal.id, refId });
-      return { recovered, excess, akChop, playerChop, tab, makeupAfter: makeup };
+      return { recovered, excess, akChop, playerChop, tab, makeupBefore, makeupAfter: makeup };
     };
     if (deal.type === "action" || (deal.cadence || "session") === "session") {
       rs.forEach((r) => {
@@ -4912,7 +4959,7 @@ function computeStaking(data, cps, live, persons) {
         const partial = list.map((r) => { const pct = r.pct ?? deal.pct ?? 100; const n = r2((+r.pnl || 0) * pct / 100); net += n; if (r.holder === "player") held += +r.pnl || 0; unstaked += (+r.pnl || 0) - n; return { ...r, pct, net: n }; });
         const last = list[list.length - 1];
         const x = settle(r2(net), 0, r2(held), r2(unstaked), last.date, deal.id + "-" + w, `Makeup · week of ${w} · net ${fmt(net)}`);
-        partial.forEach((p, i) => rows.push({ ...p, weekKey: w, weekNet: r2(net), ...(i === partial.length - 1 ? x : { recovered: null, excess: null, akChop: null, playerChop: null, tab: null, makeupAfter: null }) }));
+        partial.forEach((p, i) => rows.push({ ...p, weekKey: w, weekNet: r2(net), ...(i === partial.length - 1 ? x : { recovered: null, excess: null, akChop: null, playerChop: null, tab: null, makeupBefore: null, makeupAfter: null }) }));
       });
     }
     const out = { deal, name: cpName(deal.cpId), rows, netActionBuy: netAB, chopped, makeup, inMakeup: makeup > 0.005 };
@@ -4962,6 +5009,35 @@ function computeStaking(data, cps, live, persons) {
   return { deals: dealOut, byDeal, derived, imported: importedList, totals, makeupByCp, endedDeals, endedTotals, liveActionBuyRows };
 }
 
+// A "Unified deal" (Tabs → Staking) can be fed by several sites at once —
+// Fish Tank, an owner club, a My Clubs sub-club — folding what would
+// otherwise be several separate local makeup balances into one real backing
+// relationship. Book Summary wants just that deal's OWN most-recent week,
+// not its lifetime chopped/makeup totals, plus which sites actually fed it
+// that week (for the "(Fish Tank, Honey Pot, Betflix)" label). Returns null
+// for a deal with no dated rows at all (nothing to report).
+function unifiedDealWeekly(d) {
+  const rows = (d.rows || []).filter((r) => r.date);
+  if (!rows.length) return null;
+  const thisWeek = rows.reduce((mx, r) => { const w = weekOf(r.date); return !mx || w > mx ? w : mx; }, null);
+  const weekRows = rows.filter((r) => weekOf(r.date) === thisWeek);
+  const sites = [...new Set(weekRows.map((r) => r.game).filter(Boolean))];
+  if (d.deal.type === "action") {
+    return { name: d.name, kind: "action", net: r2(weekRows.reduce((a, r) => a + (r.net || 0), 0)), sites, thisWeek };
+  }
+  // Weekly-cadence rows only carry real akChop/makeupBefore/makeupAfter on
+  // the last row of their week group (others are nulled out above); session-
+  // cadence rows each carry their own. Either way: sum akChop across the
+  // week for chop, and take the balance at the start of the week vs. the end
+  // for accrual — not just the latest row's makeupAfter, so multiple
+  // sessions within the same week net against each other correctly.
+  const settled = weekRows.filter((r) => r.makeupAfter != null).sort((a, b) => a.date.localeCompare(b.date));
+  if (!settled.length) return null;
+  const chop = r2(weekRows.reduce((a, r) => a + (r.akChop || 0), 0));
+  const accrued = Math.max(0, r2(settled[settled.length - 1].makeupAfter - settled[0].makeupBefore));
+  return { name: d.name, kind: "makeup", chop, accrued, sites, thisWeek };
+}
+
 const TABS_VIEWS = [["balances", "Balances"], ["bookkeeping", "Bookkeeping"], ["ledger", "Ledger"], ["vig", "Vig"], ["staking", "Staking"], ["misc", "Misc. P&L"], ["players", "Player data"]];
 const sortDateDesc = (list, indexOf) => [...list].sort((a, b) => (b.date || "").localeCompare(a.date || "") || indexOf(b) - indexOf(a));
 const dateInput = (v, onChange, w = 118) => <input type="date" value={v || ""} onChange={(e) => onChange(e.target.value)} style={{ ...inputS, width: w, fontSize: 12.5 }} />;
@@ -4979,7 +5055,12 @@ async function loadBookChecklist() {
 }
 async function saveBookChecklist(items) { try { await store.set(BOOK_CHECKLIST_KEY, JSON.stringify({ items })); } catch (e) {} }
 
-// Saved weekly snapshots of the Book summary (label → totals), same key/shape as the aks-book site.
+// Weekly totals history — same pattern as My Clubs' `weeks` object: a plain
+// label → snapshot map, persisted so a past week's numbers stay lookupable
+// after that week's Fish Tank/owner-club/Tabs data has been overwritten by
+// the next one. Unlike My Clubs there's no "current week" to type into —
+// everything here is either the live, freshly-computed totals, or a
+// snapshot someone explicitly saved — so this only ever stores `weeks`.
 const BOOK_WEEKS_KEY = "book-weeks-v1";
 async function loadBookWeeks() {
   try { const c = await store.get(BOOK_WEEKS_KEY); if (c?.value) { const v = JSON.parse(c.value); if (v && typeof v.weeks === "object") return v.weeks; } } catch (e) {}
@@ -4995,32 +5076,47 @@ function BookSection() {
   const [agent, setAgent] = useState(null);
   const [persons, setPersons] = useState([]);
   const [checklist, setChecklist] = useState([]);
-  const [weeks, setWeeks] = useState({});
+  const [tabs, setTabs] = useState(null);
+  const [bookWeeks, setBookWeeks] = useState({});
+  const [viewWeek, setViewWeek] = useState(""); // "" = live; else a saved week's label
   const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => { (async () => {
     setLoaded(false);
-    const [ftM, ocM, agM, ppl, cl, wk] = await Promise.all([loadFishTankModel(), loadAllOwnerClubModels(), loadAgentModel(), loadPersons(), loadBookChecklist(), loadBookWeeks()]);
-    setFt(ftM); setOwnerClubs(ocM); setAgent(agM); setPersons(ppl); setChecklist(cl); setWeeks(wk);
+    const [ftM, ocM, agM, ppl, cl, tb, bw] = await Promise.all([loadFishTankModel(), loadAllOwnerClubModels(), loadAgentModel(), loadPersons(), loadBookChecklist(), loadTabs(), loadBookWeeks()]);
+    setFt(ftM); setOwnerClubs(ocM); setAgent(agM); setPersons(ppl); setChecklist(cl); setTabs(tb); setBookWeeks(bw);
     setLoaded(true);
   })(); }, [refreshKey]);
 
   const saveChecklist = async (items) => { setChecklist(items); await saveBookChecklist(items); };
-  const saveWeeks = async (w) => { setWeeks(w); await saveBookWeeks(w); };
-  // Snapshot the live summary under a label (e.g. "09/01 - 09/07") so it shows in Saved weeks.
-  const saveCurrentWeek = async () => {
-    const t = bookTotals({ ft, ownerClubs, agent });
-    const label = window.prompt("Save this week's totals under what label? (e.g. 09/01 - 09/07)", t.period || "");
+
+  // This week's headline totals, computed once from whatever's currently
+  // loaded — both the live summary view and "+ Save this week" read off
+  // this same object, so what gets saved is exactly what's on screen.
+  const liveTotals = useMemo(() => computeBookTotals({ ft, ownerClubs, agent, tabs, persons }), [ft, ownerClubs, agent, tabs, persons]);
+  const savedWeekLabels = Object.keys(bookWeeks).sort((a, b) => (bookWeeks[b]?.savedAt || "").localeCompare(bookWeeks[a]?.savedAt || ""));
+  const displayTotals = viewWeek && bookWeeks[viewWeek] ? bookWeeks[viewWeek] : liveTotals;
+
+  const saveThisWeek = async () => {
+    const label = window.prompt("Save this week's totals under what label? (e.g. 09/01 - 09/07)", liveTotals.period || "");
     if (!label) return;
-    if (weeks[label] && !window.confirm(`"${label}" is already saved — overwrite it with today's numbers?`)) return;
-    await saveWeeks({ ...weeks, [label]: { ...t, savedAt: new Date().toISOString() } });
-    setSubtab("weeks");
+    if (bookWeeks[label] && !window.confirm(`"${label}" is already saved — overwrite it with today's numbers?`)) return;
+    const snapshot = { ...liveTotals, savedAt: new Date().toISOString() };
+    const next = { ...bookWeeks, [label]: snapshot };
+    setBookWeeks(next); setViewWeek(label);
+    await saveBookWeeks(next);
+  };
+  const deleteSavedWeek = async () => {
+    if (!viewWeek || !window.confirm(`Delete the saved week "${viewWeek}"? This can't be undone.`)) return;
+    const next = { ...bookWeeks }; delete next[viewWeek];
+    setBookWeeks(next); setViewWeek("");
+    await saveBookWeeks(next);
   };
 
   return (
     <div>
       <div style={{ display: "flex", gap: 4, padding: "10px 26px 0", borderBottom: `2px solid ${C.line}`, background: C.paper, flexWrap: "wrap", alignItems: "center" }}>
-        {[["summary", "Summary"], ["weeks", `Saved weeks${Object.keys(weeks).length ? ` (${Object.keys(weeks).length})` : ""}`], ["checklist", "Checklist"]].map(([k, label]) => (
+        {[["summary", "Summary"], ["checklist", "Checklist"]].map(([k, label]) => (
           <button key={k} onClick={() => setSubtab(k)} style={{
             border: "none", cursor: "pointer", padding: "9px 16px", fontSize: 13.5, fontWeight: 700,
             background: subtab === k ? C.card : "transparent", color: subtab === k ? C.ink : C.mute,
@@ -5029,14 +5125,22 @@ function BookSection() {
             {label}
           </button>
         ))}
-        {subtab === "summary" && loaded && <button onClick={saveCurrentWeek} title="Save these totals as a week in Saved weeks" style={{ marginLeft: "auto", marginBottom: 6, border: `1px solid ${C.line}`, background: "none", color: C.ink, cursor: "pointer", borderRadius: 6, padding: "4px 10px", fontSize: 12, fontWeight: 600 }}>Save week</button>}
-        <button onClick={() => setRefreshKey((k) => k + 1)} title="Reload Fish Tank / owner club / My Clubs data" style={{ marginLeft: subtab === "summary" && loaded ? 6 : "auto", marginBottom: 6, border: `1px solid ${C.line}`, background: "none", color: C.mute, cursor: "pointer", borderRadius: 6, padding: "4px 10px", fontSize: 12 }}>↻ Refresh</button>
+        {subtab === "summary" && (
+          <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center", paddingBottom: 6 }}>
+            <select value={viewWeek} onChange={(e) => setViewWeek(e.target.value)} style={{ ...inputS, fontSize: 12.5 }}>
+              <option value="">Live (current data)</option>
+              {savedWeekLabels.map((k) => <option key={k} value={k}>{k}</option>)}
+            </select>
+            {viewWeek && <button title="Delete this saved week" onClick={deleteSavedWeek} style={{ border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 15 }}>×</button>}
+            <Btn tone="gold" small onClick={saveThisWeek}>+ Save this week</Btn>
+          </div>
+        )}
+        <button onClick={() => setRefreshKey((k) => k + 1)} title="Reload Fish Tank / owner club / My Clubs data" style={{ marginLeft: subtab === "summary" ? 0 : "auto", marginBottom: 6, border: `1px solid ${C.line}`, background: "none", color: C.mute, cursor: "pointer", borderRadius: 6, padding: "4px 10px", fontSize: 12 }}>↻ Refresh</button>
       </div>
       <div style={{ padding: "20px 26px 60px", maxWidth: 1180, margin: "0 auto" }}>
         {!loaded ? <div style={{ color: C.mute, padding: 20 }}>Loading…</div> : (
           <>
-            {subtab === "summary" && <BookSummary ft={ft} ownerClubs={ownerClubs} agent={agent} />}
-            {subtab === "weeks" && <BookSavedWeeks weeks={weeks} save={saveWeeks} />}
+            {subtab === "summary" && <BookSummary totals={displayTotals} viewingSaved={!!viewWeek} />}
             {subtab === "checklist" && <BookChecklist items={checklist} save={saveChecklist} persons={persons} />}
           </>
         )}
@@ -5045,166 +5149,30 @@ function BookSection() {
   );
 }
 
-// A backed player's book, split into what's actually been realized vs what's
-// still just an open marker. "Chopped profit" = action-buy net (realized
-// immediately, every session) + a makeup deal's cut of any excess win once
-// the player's makeup is cleared (also realized — the backer actually keeps
-// it). "Makeup" = the CURRENT outstanding balance on makeup deals still in
-// the red — not a loss yet, just an open marker until the stake ends (see
-// Tabs → Staking → End stake), so it's reported as its own figure rather
-// than netted in as a negative.
-function backedChopMakeup(entities, shareFn) {
-  let chop = 0, makeup = 0;
-  (entities || []).forEach((e) => {
-    const share = shareFn(e.backer);
-    if (!share) return;
-    if (e.dealType === "action") { chop += e.backerBook * share; return; }
-    const recovered = e.makeupBefore - e.makeupAfter;
-    chop += (e.backerBook - recovered) * share;
-    if (e.inMakeup) makeup += e.makeupAfter * share;
-  });
-  return { chop: r2(chop), makeup: r2(makeup) };
-}
-
-// Same math as BookSummary, flattened into the book-weeks-v1 snapshot shape.
-function bookTotals({ ft, ownerClubs, agent }) {
-  const ftPersonal = ft ? ft.model.ownPosition.ak : 0;
-  const ftFee = ft ? r2(ft.model.entitle.ak - ftPersonal - ft.model.backedBook.ak) : 0;
-  const ocRows = ownerClubs.map((oc) => {
-    const meId = oc.club.meId;
-    const personal = oc.model.ownPosition[meId] || 0;
-    return { name: oc.club.name, period: oc.period, personal, fee: r2((oc.model.profit[meId] || 0) - personal) };
-  });
-  const ocPersonalTotal = r2(ocRows.reduce((a, o) => a + o.personal, 0));
-  const ocFeeTotal = r2(ocRows.reduce((a, o) => a + o.fee, 0));
-  const ocLabel = ocRows.length === 1 ? ocRows[0].name : ocRows.length > 1 ? "Owner clubs" : "Owner club";
-  const ocFeeLabel = ocRows.length === 1 ? `${ocRows[0].name} ownership share (pool + BBJ share + personal margin + stake margin)` : `${ocLabel} ownership share`;
-  const myAcc = agent ? new Set((agent.acfg.myAccounts || []).map((n) => n.trim().toLowerCase()).filter(Boolean)) : new Set();
-  const myPlayRows = agent ? agent.model.allPlayers.filter((p) => p.played && myAcc.has(p.name.trim().toLowerCase())) : [];
-  const myPlayTotal = r2(myPlayRows.reduce((a, p) => a + p.settlement, 0));
-  const mcMargin = agent ? agent.model.totals.margin : 0;
-  const mcAdj = agent ? agent.model.totals.globalAdjTotal : 0;
-  const personalTotal = r2(ftPersonal + ocPersonalTotal + myPlayTotal);
-  const rakeProfitTotal = r2(ftFee + ocFeeTotal + mcMargin);
-  const clubTotal = r2(personalTotal + rakeProfitTotal);
-  return { period: ft?.period || "", ftPersonal, ftFee, ocRows, ocPersonalTotal, ocFeeTotal, ocLabel, ocFeeLabel, myPlayTotal, myPlayNames: [...new Set(myPlayRows.map((p) => p.name))], mcMargin, mcAdj, personalTotal, rakeProfitTotal, clubTotal, grandTotal: clubTotal, hasFt: !!ft, hasAgent: !!agent };
-}
-
-// Read-only view of saved weeks; renders whichever fields a snapshot has (older site snapshots carry staking/vig/misc too).
-function BookSavedWeeks({ weeks, save }) {
-  const labels = Object.keys(weeks).sort((a, b) => (weeks[b]?.savedAt || "").localeCompare(weeks[a]?.savedAt || ""));
-  const [sel, setSel] = useState(labels[0] || "");
-  const w = weeks[sel];
-  const row = (label, val, opts = {}) => (
-    <div style={{ display: "flex", padding: "5px 0", fontSize: 13.5, paddingLeft: opts.indent ? 16 : 0, borderTop: opts.line ? `1px solid ${C.line}` : "none" }}>
-      <span style={{ color: opts.bold ? C.ink : C.mute, fontWeight: opts.bold ? 700 : 400 }}>{label}</span>
-      <span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums", fontWeight: opts.bold ? 700 : 500 }}>{money(val || 0)}</span>
-    </div>
-  );
-  const del = async () => {
-    if (!sel || !window.confirm(`Delete the saved week "${sel}"? This can't be undone.`)) return;
-    const next = { ...weeks }; delete next[sel];
-    await save(next); setSel(Object.keys(next)[0] || "");
-  };
-  if (!labels.length) return <Card title="No saved weeks yet"><div style={{ color: C.mute, fontSize: 13 }}>Use <b>Save week</b> on the Summary tab to snapshot a week's totals.</div></Card>;
-  const peopleRows = (title, rows, key) => rows?.length > 0 && (
-    <Card title={title}>
-      {rows.map((r) => (
-        <div key={r.name} style={{ display: "flex", gap: 10, padding: "5px 0", fontSize: 12.5, borderTop: `1px solid ${C.line}`, flexWrap: "wrap" }}>
-          <b>{r.name}</b><span style={{ color: C.mute }}>{(r.sites || []).join(", ")}</span>
-          <span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums" }}>{key === "makeup" ? <>chop {money(r.chop)} · accrued makeup <b style={{ color: C.goldDark }}>{fmt(r.accrued)}</b></> : <>net {money(r.net)}</>}</span>
-        </div>
-      ))}
-    </Card>
-  );
-  return (
-    <div style={{ display: "grid", gap: 14 }}>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <select value={sel} onChange={(e) => setSel(e.target.value)} style={{ padding: "6px 8px", borderRadius: 6, border: `1px solid ${C.line}`, background: C.card, color: C.ink, fontSize: 13 }}>
-          {labels.map((l) => <option key={l} value={l}>{l}</option>)}
-        </select>
-        {w?.savedAt && <span style={{ color: C.mute, fontSize: 12 }}>saved {new Date(w.savedAt).toLocaleString()}{w.reconstructed ? " · reconstructed" : ""}</span>}
-        <button onClick={del} style={{ marginLeft: "auto", border: `1px solid ${C.line}`, background: "none", color: C.red, cursor: "pointer", borderRadius: 6, padding: "4px 10px", fontSize: 12 }}>Delete week</button>
-      </div>
-      {w && (<>
-        <Card title={`Week ${sel}`}>
-          {w.period && <div style={{ color: C.mute, fontSize: 12, marginBottom: 6 }}>{w.period}</div>}
-          {row("GRAND TOTAL", w.grandTotal ?? w.clubTotal, { bold: true })}
-          {row("Club weekly P&L", w.clubTotal, { line: true, bold: true })}
-          {row("Personal play total", w.personalTotal, { indent: true })}
-          {row("All in Fish Tank", w.ftPersonal, { indent: true })}
-          {row(w.ocLabel || "Owner clubs", w.ocPersonalTotal, { indent: true })}
-          {row(`Remaining clubs${w.myPlayNames?.length ? ` (${w.myPlayNames.join(", ")})` : ""}`, w.myPlayTotal, { indent: true })}
-          {row("Fee margin total", w.rakeProfitTotal, { indent: true })}
-          {row("All in Fish Tank ownership share", w.ftFee, { indent: true })}
-          {row(w.ocFeeLabel || "Owner clubs ownership share", w.ocFeeTotal, { indent: true })}
-          {row("Personal DL margin", w.mcMargin, { indent: true })}
-          {w.stakingVigMiscTotal != null && <>
-            {row("Staking + vig + misc", w.stakingVigMiscTotal, { line: true, bold: true })}
-            {row("Makeup chopped profit", w.makeupChopTotal, { indent: true })}
-            {row("Action buy net", w.actionNetTotal, { indent: true })}
-            {row(`Vig${w.priorWeekStart ? ` (${w.priorWeekStart} – ${w.priorWeekEnd})` : ""}`, w.vigWeekTotal, { indent: true })}
-            {row("Misc P&L", w.miscWeekTotal, { indent: true })}
-          </>}
-          {w.makeupAccruedTotal != null && <div style={{ color: C.mute, fontSize: 12, marginTop: 6 }}>Accrued makeup (open marker, not in totals): <b style={{ color: C.goldDark }}>{fmt(w.makeupAccruedTotal)}</b></div>}
-        </Card>
-        {w.ocRows?.length > 1 && (
-          <Card title="Owner clubs — by club">
-            {w.ocRows.map((o) => <div key={o.name} style={{ display: "flex", gap: 10, padding: "5px 0", fontSize: 12.5, borderTop: `1px solid ${C.line}`, flexWrap: "wrap" }}><b>{o.name}</b><span style={{ color: C.mute }}>{o.period}</span><span style={{ marginLeft: "auto" }}>personal play {money(o.personal)} · fee margin {money(o.fee)}</span></div>)}
-          </Card>
-        )}
-        {peopleRows("Makeup stakes", w.makeupRows, "makeup")}
-        {peopleRows("Action buys", w.actionRows, "action")}
-        {(w.vigRows?.length > 0 || w.miscRows?.length > 0) && (
-          <Card title="Vig & misc">
-            {(w.vigRows || []).map((r) => row(`Vig · ${r.name}`, r.vig))}
-            {(w.miscRows || []).map((r, i) => <div key={i}>{row(`Misc · ${r.category || "uncategorized"}`, r.amount)}</div>)}
-          </Card>
-        )}
-      </>)}
-    </div>
-  );
-}
-
-function BookSummary({ ft, ownerClubs, agent }) {
-  const row = (label, val, opts = {}) => (
-    <div style={{ display: "flex", padding: "6px 0", fontSize: 13.5, paddingLeft: opts.indent ? 16 : 0 }}>
-      <span style={{ color: opts.bold ? C.ink : C.mute, fontWeight: opts.bold ? 700 : 400 }}>{label}</span>
-      <span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums", fontWeight: opts.bold ? 700 : 500 }}>{money(val)}</span>
-    </div>
-  );
-  const rowCM = (label, chop, makeup) => (
-    <div style={{ display: "flex", padding: "6px 0", fontSize: 13.5, alignItems: "baseline", flexWrap: "wrap", rowGap: 2 }}>
-      <span style={{ color: C.mute }}>{label}</span>
-      <span style={{ marginLeft: "auto", display: "flex", gap: 18, fontVariantNumeric: "tabular-nums" }}>
-        <span>chopped profit {money(chop)}</span>
-        <span>makeup <b style={{ color: C.goldDark }}>{fmt(makeup)}</b></span>
-      </span>
-    </div>
-  );
-
+// Every number Book Summary shows, computed once from whatever's currently
+// loaded (or, for a saved week, exactly this same shape read back out of
+// storage — BookSummary itself doesn't know or care which). Kept a plain,
+// JSON-serializable object (no JSX) on purpose: it's exactly what "+ Save
+// this week" persists verbatim, so what you save is exactly what you saw.
+function computeBookTotals({ ft, ownerClubs, agent, tabs, persons }) {
   // Fish Tank: entitle.ak bundles personal play + ½ profit + staking together —
   // split it apart and drop the staking piece (backed books).
   const ftPersonal = ft ? ft.model.ownPosition.ak : 0;
   const ftStaking = ft ? ft.model.backedBook.ak : 0;
   const ftFee = ft ? r2(ft.model.entitle.ak - ftPersonal - ftStaking) : 0;
-  const ftCM = ft ? backedChopMakeup(ft.model.backedEntities, (backer) => (backer === "split" ? 0.5 : backer === "ak" ? 1 : 0)) : { chop: 0, makeup: 0 };
 
   // Owner clubs (Midnight Bazaar + any others added) — Ak's share on each.
   // Unlike Fish Tank, "profit" here already excludes the deal/backed book, so
   // the fee margin is just profit minus own-account play.
-  const ocRows = ownerClubs.map((oc) => {
+  const ocRows = (ownerClubs || []).map((oc) => {
     const meId = oc.club.meId;
     const personal = oc.model.ownPosition[meId] || 0;
     const staking = oc.model.backedBook[meId] || 0;
     const fee = r2((oc.model.profit[meId] || 0) - personal);
-    const cm = backedChopMakeup(oc.model.backedEntities, (backer) => oc.model.H.shareOf(backer, meId));
-    return { name: oc.club.name, period: oc.period, personal, staking, fee, cm };
+    return { name: oc.club.name, period: oc.period, personal, staking, fee };
   });
   const ocPersonalTotal = r2(ocRows.reduce((a, o) => a + o.personal, 0));
   const ocFeeTotal = r2(ocRows.reduce((a, o) => a + o.fee, 0));
-  const ocChopTotal = r2(ocRows.reduce((a, o) => a + o.cm.chop, 0));
-  const ocMakeupTotal = r2(ocRows.reduce((a, o) => a + o.cm.makeup, 0));
   // Only Midnight Bazaar existed as an owner club when these labels were first
   // written, so its name got hardcoded — now that more can be added (e.g.
   // Honey Pot), name it when there's exactly one, and fall back to a generic
@@ -5217,41 +5185,171 @@ function BookSummary({ ft, ownerClubs, agent }) {
   const myAcc = agent ? new Set((agent.acfg.myAccounts || []).map((n) => n.trim().toLowerCase()).filter(Boolean)) : new Set();
   const myPlayRows = agent ? agent.model.allPlayers.filter((p) => p.played && myAcc.has(p.name.trim().toLowerCase())) : [];
   const myPlayTotal = r2(myPlayRows.reduce((a, p) => a + p.settlement, 0));
+  const myPlayNames = [...new Set(myPlayRows.map((p) => p.name))];
   const mcMargin = agent ? agent.model.totals.margin : 0;
   const mcAdj = agent ? agent.model.totals.globalAdjTotal : 0;
 
+  // Headline #1 — total P&L playing on personal accounts, everywhere.
   const personalTotal = r2(ftPersonal + ocPersonalTotal + myPlayTotal);
-  const feeTotal = r2(ftFee + ocFeeTotal + mcMargin);
-  const total = r2(personalTotal + feeTotal);
+  // Headline #2 — total ClubGG rake profit made (fee/rakeback margins earned
+  // running the clubs, no personal play mixed in).
+  const rakeProfitTotal = r2(ftFee + ocFeeTotal + mcMargin);
+  const clubTotal = r2(personalTotal + rakeProfitTotal);
+
+  // ——— Staking: Makeup deals + Action buys, one row per PLAYER (not per
+  // club) across every site that fed them this week. A backed makeup player
+  // linked to a "Unified deal" (Tabs → Staking) has their local per-club
+  // number excluded here — the moment a unified deal exists, that site's own
+  // local balance is frozen/vestigial (see the unifiedDealId wiring
+  // elsewhere) — and their real, combined-across-sites weekly number comes
+  // from the shared deal instead (unifiedDealWeekly), which is also the only
+  // place a My Clubs contribution shows up, since My Clubs has no local
+  // staking system of its own — only the option to link a player into a
+  // unified deal. Everyone's grouped by their canonical Player Data name so
+  // the same person under different site usernames still lands on one line.
+  const mapName = makeNameMapper(persons || []);
+  const unifiedIdOf = (backedCfg, key) => (backedCfg?.[key.slice(2)]?.unifiedDealId || "").trim();
+  const localShareRows = [];
+  if (ft) {
+    const local = ft.model.backedEntities.filter((e) => !(e.dealType === "makeup" && unifiedIdOf(ft.cfg?.backed, e.key)));
+    localShareRows.push(...backedShareRows(local, (backer) => (backer === "split" ? 0.5 : backer === "ak" ? 1 : 0), "Fish Tank", mapName));
+  }
+  (ownerClubs || []).forEach((oc) => {
+    const meId = oc.club.meId;
+    const local = oc.model.backedEntities.filter((e) => !(e.dealType === "makeup" && unifiedIdOf(oc.cfg?.backed, e.key)));
+    localShareRows.push(...backedShareRows(local, (backer) => oc.model.H.shareOf(backer, meId), oc.club.name, mapName));
+  });
+  const staking = computeStaking(tabs || TABS_EMPTY, tabs?.counterparties || [], [], persons || []);
+  const unifiedWeekly = staking.deals.filter((d) => !d.deal.ended).map(unifiedDealWeekly).filter(Boolean);
+
+  const makeupGroups = new Map(), actionGroups = new Map();
+  const bump = (map, name, patch) => { const g = map.get(name) || { name, sites: new Set(), chop: 0, accrued: 0, net: 0 }; patch(g); map.set(name, g); };
+  localShareRows.forEach((r) => {
+    if (r.kind === "makeup") bump(makeupGroups, r.name, (g) => { g.sites.add(r.site); g.chop = r2(g.chop + r.chopped); g.accrued = r2(g.accrued + Math.max(0, r2(r.makeupAfter - r.makeupBefore))); });
+    else bump(actionGroups, r.name, (g) => { g.sites.add(r.site); g.net = r2(g.net + r.net); });
+  });
+  unifiedWeekly.forEach((u) => {
+    if (u.kind === "makeup") bump(makeupGroups, u.name, (g) => { u.sites.forEach((s) => g.sites.add(s)); g.chop = r2(g.chop + u.chop); g.accrued = r2(g.accrued + u.accrued); });
+    else bump(actionGroups, u.name, (g) => { u.sites.forEach((s) => g.sites.add(s)); g.net = r2(g.net + u.net); });
+  });
+  const makeupRows = [...makeupGroups.values()].filter((g) => Math.abs(g.chop) > 0.005 || g.accrued > 0.005).map((g) => ({ ...g, sites: [...g.sites] })).sort((a, b) => b.accrued - a.accrued || b.chop - a.chop);
+  const actionRows = [...actionGroups.values()].filter((g) => Math.abs(g.net) > 0.005).map((g) => ({ ...g, sites: [...g.sites] })).sort((a, b) => b.net - a.net);
+  const makeupChopTotal = r2(makeupRows.reduce((a, g) => a + g.chop, 0));
+  const makeupAccruedTotal = r2(makeupRows.reduce((a, g) => a + g.accrued, 0));
+  const actionNetTotal = r2(actionRows.reduce((a, g) => a + g.net, 0));
+
+  // Crypto vig + Misc P&L, prior week only (Tabs → Vig / Misc P&L) — the
+  // most recently completed Mon–Sun week, not whatever week is still in
+  // progress today.
+  const priorWeekStart = (() => { const d = new Date(weekOf(today()) + "T00:00:00"); d.setDate(d.getDate() - 7); return d.toISOString().slice(0, 10); })();
+  const priorWeekEnd = (() => { const d = new Date(priorWeekStart + "T00:00:00"); d.setDate(d.getDate() + 6); return d.toISOString().slice(0, 10); })();
+  const vigWeekEntries = tabs ? tabs.entries.filter((e) => isCrypto(e.method) && weekOf(e.date) === priorWeekStart) : [];
+  const vigWeekTotal = r2(vigWeekEntries.reduce((a, e) => a + (+e.vig || 0), 0));
+  const vigGains = r2(vigWeekEntries.filter((e) => e.vig > 0).reduce((a, e) => a + e.vig, 0));
+  const vigLosses = r2(vigWeekEntries.filter((e) => e.vig < 0).reduce((a, e) => a + e.vig, 0));
+  const cpName = (id) => tabs?.counterparties.find((c) => c.id === id)?.name || "?";
+  const vigByCp = {};
+  vigWeekEntries.forEach((e) => { vigByCp[e.cpId] = r2((vigByCp[e.cpId] || 0) + (+e.vig || 0)); });
+  const vigRows = Object.entries(vigByCp).map(([id, v]) => ({ name: cpName(id), vig: v })).sort((a, b) => b.vig - a.vig);
+
+  const miscWeekEntries = tabs ? (tabs.misc || []).filter((e) => weekOf(e.date) === priorWeekStart) : [];
+  const miscWeekTotal = r2(miscWeekEntries.reduce((a, e) => a + (+e.amount || 0), 0));
+  const miscByCat = {};
+  miscWeekEntries.forEach((e) => { const k = e.category || "uncategorized"; miscByCat[k] = r2((miscByCat[k] || 0) + (+e.amount || 0)); });
+  const miscRows = Object.entries(miscByCat).map(([category, amount]) => ({ category, amount })).sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
+
+  // Headline #3 — total P&L on staking + vig + misc, combined. Only the
+  // REALIZED pieces count as P&L here (chop, action-buy net, vig, misc) —
+  // makeup still just accruing is deliberately left out, same "not a loss
+  // yet" reasoning as the breakdown card below; it's shown there for
+  // reference but doesn't feed this total.
+  const stakingVigMiscTotal = r2(makeupChopTotal + actionNetTotal + vigWeekTotal + miscWeekTotal);
+
+  return {
+    period: ft?.period || "",
+    ftPersonal, ftFee, ocRows, ocPersonalTotal, ocFeeTotal, ocLabel, ocFeeLabel,
+    myPlayTotal, myPlayNames, mcMargin, mcAdj,
+    personalTotal, rakeProfitTotal, clubTotal,
+    makeupRows, actionRows, makeupChopTotal, makeupAccruedTotal, actionNetTotal,
+    priorWeekStart, priorWeekEnd, vigRows, vigWeekTotal, vigGains, vigLosses,
+    miscRows, miscWeekTotal,
+    stakingVigMiscTotal,
+    hasFt: !!ft, hasAgent: !!agent,
+  };
+}
+
+// Pure presentational — renders whatever `totals` object it's handed
+// (computeBookTotals' shape), whether that's the live, freshly-computed
+// week or a snapshot pulled back out of the saved-weeks history.
+function BookSummary({ totals: t, viewingSaved }) {
+  const row = (label, val, opts = {}) => (
+    <div style={{ display: "flex", padding: "6px 0", fontSize: 13.5, paddingLeft: opts.indent ? 16 : 0 }}>
+      <span style={{ color: opts.bold ? C.ink : C.mute, fontWeight: opts.bold ? 700 : 400 }}>{label}</span>
+      <span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums", fontWeight: opts.bold ? 700 : 500 }}>{money(val)}</span>
+    </div>
+  );
+  const siteLabel = (s) => (String(s || "").startsWith("My Clubs · ") ? s.slice("My Clubs · ".length) : s);
+  const sitesText = (sites) => (sites && sites.length ? ` (${sites.map(siteLabel).join(", ")})` : "");
+  const makeupRow = (g, opts = {}) => (
+    <div key={g.name} style={{ display: "flex", padding: "6px 0", fontSize: opts.bold ? 13.5 : 12.5, alignItems: "baseline", flexWrap: "wrap", rowGap: 2, borderTop: opts.bold ? "none" : `1px solid ${C.line}` }}>
+      <span style={{ color: opts.bold ? C.ink : C.mute, fontWeight: opts.bold ? 700 : 400 }}>{g.name}{!opts.bold ? sitesText(g.sites) : ""}</span>
+      <span style={{ marginLeft: "auto", display: "flex", gap: 18, fontVariantNumeric: "tabular-nums" }}>
+        <span>chop {money(g.chop)}</span>
+        <span>makeup accrued <b style={{ color: C.goldDark }}>{fmt(g.accrued)}</b></span>
+      </span>
+    </div>
+  );
+  const actionRow = (g, opts = {}) => (
+    <div key={g.name} style={{ display: "flex", padding: "6px 0", fontSize: opts.bold ? 13.5 : 12.5, alignItems: "baseline", flexWrap: "wrap", rowGap: 2, borderTop: opts.bold ? "none" : `1px solid ${C.line}` }}>
+      <span style={{ color: opts.bold ? C.ink : C.mute, fontWeight: opts.bold ? 700 : 400 }}>{g.name}{!opts.bold ? sitesText(g.sites) : ""}</span>
+      <span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums" }}>{money(g.net)}</span>
+    </div>
+  );
 
   return (
     <div>
+      {viewingSaved && (
+        <div style={{ marginBottom: 14, padding: "8px 12px", background: C.cream, borderRadius: 8, fontSize: 12.5, color: C.mute }}>
+          Viewing a saved week{t.savedAt ? ` · saved ${new Date(t.savedAt).toLocaleString()}` : ""} — not live data. Switch to "Live (current data)" above to see what's currently loaded.
+        </div>
+      )}
+
       <div style={{ marginBottom: 14 }}>
-        <Card title="Total club weekly P&L">
-          <div style={{ color: C.mute, fontSize: 12, marginBottom: 8 }}>Personal play + fee margins only — staking (backed books / deal books, chop, makeup) is tracked separately in Tabs → Staking and excluded here.</div>
-          {row("TOTAL", total, { bold: true })}
+        <Card title="Ak's net gain/loss" right={<Pill tone="gold">headline</Pill>}>
+          {row("Personal play (Fish Tank + owner clubs + My Clubs)", t.personalTotal)}
+          {row("Rake generation (ClubGG fee/margin profit)", t.rakeProfitTotal)}
           <div style={{ borderTop: `1px solid ${C.line}`, margin: "10px 0 4px" }} />
-          <div style={{ fontWeight: 700, fontSize: 13, marginTop: 6, marginBottom: 2 }}>Personal play</div>
-          {row(`All in Fish Tank${ft?.period ? ` · ${ft.period}` : ""}`, ftPersonal, { indent: true })}
-          {!ft && <div style={{ color: C.mute, fontSize: 11.5, paddingLeft: 16 }}>No Fish Tank week loaded.</div>}
-          {row(ocLabel, ocPersonalTotal, { indent: true })}
-          {ocRows.length === 0 && <div style={{ color: C.mute, fontSize: 11.5, paddingLeft: 16 }}>No owner club week loaded.</div>}
-          {row(`Remaining clubs${myPlayRows.length ? ` (${[...new Set(myPlayRows.map((p) => p.name))].join(", ")})` : ""}`, myPlayTotal, { indent: true })}
-          {!agent && <div style={{ color: C.mute, fontSize: 11.5, paddingLeft: 16 }}>No My Clubs week loaded.</div>}
-          {row("Personal play total", personalTotal, { bold: true })}
-          <div style={{ borderTop: `1px solid ${C.line}`, margin: "10px 0 4px" }} />
-          <div style={{ fontWeight: 700, fontSize: 13, marginTop: 6, marginBottom: 2 }}>Fee margin profits</div>
-          {row(`All in Fish Tank ownership share${ft?.period ? ` · ${ft.period}` : ""}`, ftFee, { indent: true })}
-          {row(ocFeeLabel, ocFeeTotal, { indent: true })}
-          {row("Personal DL margin", mcMargin, { indent: true })}
-          {row("Fee margin total", feeTotal, { bold: true })}
+          {row("TOTAL", t.clubTotal, { bold: true })}
+          <div style={{ color: C.mute, fontSize: 11, marginTop: 8 }}>Staking, vig, and misc P&L are tracked separately below and not counted in this total. Use "+ Save this week" above to keep this week's number on record.</div>
         </Card>
       </div>
 
-      {ocRows.length > 1 && (
+      <div style={{ marginBottom: 14 }}>
+        <Card title="Total club weekly P&L">
+          <div style={{ color: C.mute, fontSize: 12, marginBottom: 8 }}>Personal play + fee margins only — staking (backed books / deal books, chop, makeup) is tracked separately in Tabs → Staking and excluded here.</div>
+          {row("TOTAL", t.clubTotal, { bold: true })}
+          <div style={{ borderTop: `1px solid ${C.line}`, margin: "10px 0 4px" }} />
+          <div style={{ fontWeight: 700, fontSize: 13, marginTop: 6, marginBottom: 2 }}>Personal play</div>
+          {row(`All in Fish Tank${t.period ? ` · ${t.period}` : ""}`, t.ftPersonal, { indent: true })}
+          {!t.hasFt && <div style={{ color: C.mute, fontSize: 11.5, paddingLeft: 16 }}>No Fish Tank week loaded.</div>}
+          {row(t.ocLabel, t.ocPersonalTotal, { indent: true })}
+          {t.ocRows.length === 0 && <div style={{ color: C.mute, fontSize: 11.5, paddingLeft: 16 }}>No owner club week loaded.</div>}
+          {row(`Remaining clubs${t.myPlayNames.length ? ` (${t.myPlayNames.join(", ")})` : ""}`, t.myPlayTotal, { indent: true })}
+          {!t.hasAgent && <div style={{ color: C.mute, fontSize: 11.5, paddingLeft: 16 }}>No My Clubs week loaded.</div>}
+          {row("Personal play total", t.personalTotal, { bold: true })}
+          <div style={{ borderTop: `1px solid ${C.line}`, margin: "10px 0 4px" }} />
+          <div style={{ fontWeight: 700, fontSize: 13, marginTop: 6, marginBottom: 2 }}>Fee margin profits</div>
+          {row(`All in Fish Tank ownership share${t.period ? ` · ${t.period}` : ""}`, t.ftFee, { indent: true })}
+          {row(t.ocFeeLabel, t.ocFeeTotal, { indent: true })}
+          {row("Personal DL margin", t.mcMargin, { indent: true })}
+          {row("Fee margin total", t.rakeProfitTotal, { bold: true })}
+        </Card>
+      </div>
+
+      {t.ocRows.length > 1 && (
         <div style={{ marginBottom: 14 }}>
           <Card title="Owner clubs — by club">
-            {ocRows.map((o) => (
+            {t.ocRows.map((o) => (
               <div key={o.name} style={{ borderTop: `1px solid ${C.line}`, padding: "6px 0", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 12.5 }}>
                 <b>{o.name}</b><span style={{ color: C.mute }}>{o.period}</span>
                 <span style={{ marginLeft: "auto" }}>personal play {money(o.personal)} · fee margin {money(o.fee)}</span>
@@ -5261,12 +5359,68 @@ function BookSummary({ ft, ownerClubs, agent }) {
         </div>
       )}
 
-      <Card title="Not included above — tracked separately">
-        <div style={{ color: C.mute, fontSize: 12, marginBottom: 8 }}>Staking and My Clubs' general adjustments aren't part of the club P&L above — shown here for reference only. Makeup is the current outstanding balance, not a loss — it only becomes one if a stake ends still in the red (Tabs → Staking → End stake).</div>
-        {rowCM("Fish Tank — backed books (staking)", ftCM.chop, ftCM.makeup)}
-        {rowCM(`${ocLabel} — deal books (staking)`, ocChopTotal, ocMakeupTotal)}
-        {row("My Clubs — general adjustments", mcAdj)}
-      </Card>
+      <div style={{ marginBottom: 14 }}>
+        <Card title="Not included above — tracked separately">
+          <div style={{ color: C.mute, fontSize: 12, marginBottom: 8 }}>Staking and My Clubs' general adjustments aren't part of the club P&L above — shown here for reference only, grouped per player across every site (Fish Tank, owner clubs, My Clubs) that fed them this week. "Makeup accrued" is just the new makeup that piled up this week (a losing session), not the running balance — not a loss yet, just an open marker until a stake ends still in the red (Tabs → Staking → End stake).</div>
+
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>Makeup deals</div>
+          {makeupRow({ name: "TOTAL", chop: t.makeupChopTotal, accrued: t.makeupAccruedTotal }, { bold: true })}
+          {t.makeupRows.length === 0
+            ? <div style={{ color: C.mute, fontSize: 11.5, padding: "4px 0" }}>No makeup-deal activity this week.</div>
+            : t.makeupRows.map((g) => makeupRow(g))}
+
+          <div style={{ fontWeight: 700, fontSize: 13, marginTop: 14, marginBottom: 2 }}>Action buys</div>
+          {actionRow({ name: "TOTAL", net: t.actionNetTotal }, { bold: true })}
+          {t.actionRows.length === 0
+            ? <div style={{ color: C.mute, fontSize: 11.5, padding: "4px 0" }}>No action-buy activity this week.</div>
+            : t.actionRows.map((g) => actionRow(g))}
+
+          <div style={{ borderTop: `1px solid ${C.line}`, margin: "12px 0 4px" }} />
+          {row("My Clubs — general adjustments", t.mcAdj)}
+        </Card>
+      </div>
+
+      <div style={{ marginBottom: 14 }}>
+        <Card title="Vig — prior week">
+          <div style={{ color: C.mute, fontSize: 12, marginBottom: 8 }}>Crypto transaction vig logged in Tabs → Vig, for the week of {t.priorWeekStart} – {t.priorWeekEnd}.</div>
+          {t.vigRows.length === 0
+            ? <div style={{ color: C.mute, fontSize: 12.5 }}>No crypto transactions logged that week.</div>
+            : (
+              <>
+                {row("TOTAL", t.vigWeekTotal, { bold: true })}
+                <div style={{ display: "flex", gap: 16, padding: "2px 0 10px", fontSize: 12, color: C.mute }}>
+                  <span>gains {fmt(t.vigGains)}</span>
+                  <span>losses {fmt(t.vigLosses)}</span>
+                </div>
+                {t.vigRows.map((r) => (
+                  <div key={r.name} style={{ display: "flex", padding: "4px 0", fontSize: 12.5, borderTop: `1px solid ${C.line}` }}>
+                    <span style={{ color: C.mute }}>{r.name}</span>
+                    <span style={{ marginLeft: "auto", fontWeight: 600, color: r.vig > 0.005 ? C.green : r.vig < -0.005 ? C.red : C.ink }}>{fmt(r.vig)}</span>
+                  </div>
+                ))}
+              </>
+            )}
+        </Card>
+      </div>
+
+      <div>
+        <Card title="Misc P&L — prior week">
+          <div style={{ color: C.mute, fontSize: 12, marginBottom: 8 }}>Tabs → Misc P&L entries logged for the week of {t.priorWeekStart} – {t.priorWeekEnd}.</div>
+          {t.miscRows.length === 0
+            ? <div style={{ color: C.mute, fontSize: 12.5 }}>No misc P&L entries logged that week.</div>
+            : (
+              <>
+                {row("TOTAL", t.miscWeekTotal, { bold: true })}
+                {t.miscRows.map((r) => (
+                  <div key={r.category} style={{ display: "flex", padding: "4px 0", fontSize: 12.5, borderTop: `1px solid ${C.line}` }}>
+                    <span style={{ color: C.mute }}>{r.category}</span>
+                    <span style={{ marginLeft: "auto", fontWeight: 600, color: r.amount > 0.005 ? C.green : r.amount < -0.005 ? C.red : C.ink }}>{fmt(r.amount)}</span>
+                  </div>
+                ))}
+              </>
+            )}
+        </Card>
+      </div>
     </div>
   );
 }
