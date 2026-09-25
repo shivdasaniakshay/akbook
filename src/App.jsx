@@ -7,7 +7,7 @@ import { store, blobPut as idbPut, blobGet as idbGet, blobDel as idbDel } from "
 
 // ———————————————— Seed / snapshot ————————————————
 // Everything the app knows lives under these localStorage keys.
-const STATE_KEYS_STATIC = ["fishtank-config-v4", "fishtank-lastweek-v4", "agentclubs-v3", "tabs-v1", "allamerican-v1", "allamerican-lastweek-v1", "ownerclubs-v1", "archive-index-v1", "book-weeks-v1", "book-checklist-v1", "fishtank-club-v1", "fishtank-club-week-v1", "ui-v1"];
+const STATE_KEYS_STATIC = ["fishtank-config-v4", "fishtank-lastweek-v4", "agentclubs-v3", "tabs-v1", "allamerican-v1", "allamerican-lastweek-v1", "ownerclubs-v1", "archive-index-v1", "book-weeks-v1", "book-checklist-v1", "fishtank-club-v1", "fishtank-club-week-v1", "ui-v1", "bankroll-v1"];
 // Owner clubs added later live under oc-cfg-* / oc-week-* keys — pick those up too.
 const allStateKeys = () => {
   const all = [...STATE_KEYS_STATIC];
@@ -1057,7 +1057,7 @@ export default function App() {
           <button onClick={addClub} title="Add a club" style={{ border: "none", cursor: "pointer", borderRadius: 5, padding: "5px 9px", fontSize: 13, fontWeight: 700, background: "transparent", color: "var(--barMute)" }}>+</button>
         </div>
         <div style={{ display: "flex", gap: 2, background: "rgba(255,255,255,0.08)", borderRadius: 7, padding: 3, flexWrap: "wrap" }}>
-          {[["agent", "My Clubs"], ["book", "Book"], ["tabs", "Tabs"], ["archive", "Archive"]].map(([k, l]) => navBtn(k, l))}
+          {[["agent", "My Clubs"], ["book", "Book"], ["tabs", "Tabs"], ["archive", "Archive"], ["bankroll", "Bankroll"]].map(([k, l]) => navBtn(k, l))}
         </div>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
           <input ref={seedRef} type="file" accept=".json,application/json" style={{ display: "none" }}
@@ -1077,6 +1077,8 @@ export default function App() {
         <AllAmerican key={activeClub.id} club={activeClub} clubs={clubs} saveClubs={saveClubs} onDeleteClub={deleteClub} />
       ) : mode === "archive" ? (
         <ArchiveView clubs={clubs} />
+      ) : mode === "bankroll" ? (
+        <Bankroll clubs={clubs} />
       ) : (
         <TabsLedger clubs={clubs} />
       )}
@@ -3930,6 +3932,191 @@ function AllAmerican({ club, clubs, saveClubs, onDeleteClub }) {
             </>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+// ———————————————— Bankroll tracker ————————————————
+// Your own sessions (live/online, cash/tournament) plus your weekly personal play from the clubs.
+const BR_KEY = "bankroll-v1";
+const BR_GAMES = ["NLH", "PLO", "PLO5", "PLO Hi-Lo", "Big O", "Mixed", "Other"];
+const BR_EMPTY = { start: 0, adjustments: [], sessions: [], hideClub: false };
+async function loadBankroll() { try { const c = await store.get(BR_KEY); if (c?.value) return { ...BR_EMPTY, ...JSON.parse(c.value) }; } catch (e) {} return { ...BR_EMPTY }; }
+async function saveBankroll(b) { try { await store.set(BR_KEY, JSON.stringify(b)); } catch (e) {} }
+const periodEnd = (period) => { const m = String(period || "").match(/~\s*(\d{4}-\d\d-\d\d)/); return m ? m[1] : today(); };
+// "9/14 - 9/20" style My Clubs week key → end date this year (or last year if that lands in the future).
+const mcWeekEnd = (wk) => { const m = String(wk).match(/(\d{1,2})\/(\d{1,2})\s*$/); if (!m) return today(); const y = new Date().getFullYear(); let d = `${y}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`; if (d > today() && +m[1] > new Date().getMonth() + 2) d = `${y - 1}${d.slice(4)}`; return d; };
+// Weekly personal play from every club week we have data for (current + archived) and every My Clubs week.
+async function collectClubPlay(clubs) {
+  const out = [];
+  const idx = await loadArchiveIndex();
+  for (const club of clubs) {
+    const weeks = {};
+    try { const d = await store.get(club.weekKey), cf = await store.get(club.cfgKey); if (d?.value) { const w = JSON.parse(d.value); if (w.players?.length) weeks[w.period] = { players: w.players, cfg: { ...AA_DEFAULT_CFG, ...(cf?.value ? JSON.parse(cf.value) : {}) } }; } } catch (e) {}
+    for (const w of idx.weeks.filter((x) => x.site === club.id && x.hasData && !weeks[x.period])) { const a = await loadArchivedWeek(club.id, w.period); if (a?.players?.length) weeks[w.period] = { players: a.players, cfg: { ...AA_DEFAULT_CFG, ...a.cfg } }; }
+    Object.entries(weeks).forEach(([period, w]) => {
+      const m = buildAAModel(w.players, w.cfg, period, club);
+      const mine = m.own.filter((p) => p.owner === club.meId);
+      if (!mine.length) return;
+      out.push({ key: `${club.id}|${period}`, date: periodEnd(period), venue: club.name, result: r2(mine.reduce((a, p) => a + p.position, 0)), hands: mine.reduce((a, p) => a + (p.hands || 0), 0), note: `${[...new Set(mine.map((p) => p.name))].join(", ")} · ${bookLabel(period)}` });
+    });
+  }
+  try {
+    const c = await store.get("agentclubs-v3");
+    if (c?.value) {
+      const acfg = normalizeAgent({ ...AGENT_DEFAULT, ...JSON.parse(c.value) });
+      const myAcc = new Set((acfg.myAccounts || []).map((n) => n.trim().toLowerCase()).filter(Boolean));
+      Object.keys(acfg.weeks || {}).forEach((wk) => {
+        const m = computeAgent(acfg, acfg.weeks[wk]);
+        const rows = m.allPlayers.filter((p) => p.played && myAcc.has(p.name.trim().toLowerCase()));
+        if (!rows.length) return;
+        out.push({ key: `mc|${wk}`, date: mcWeekEnd(wk), venue: "My Clubs", result: r2(rows.reduce((a, p) => a + p.settlement, 0)), hands: 0, note: `${[...new Set(rows.map((p) => p.name))].join(", ")} · ${wk}` });
+      });
+    }
+  } catch (e) {}
+  return out;
+}
+
+function Bankroll({ clubs }) {
+  const [b, setB] = useState(null);
+  const [club, setClub] = useState([]);
+  const [range, setRange] = useState("all");
+  const [mode, setMode] = useState("bankroll");
+  const [form, setForm] = useState(null);
+  const [filter, setFilter] = useState("all");
+  useEffect(() => { (async () => { setB(await loadBankroll()); setClub(await collectClubPlay(clubs)); })(); }, []);
+  if (!b) return <div style={{ padding: 40, color: C.mute }}>Loading…</div>;
+  const save = async (next) => { setB(next); await saveBankroll(next); };
+
+  // Every result as one list: manual sessions + club weeks (unless hidden).
+  const all = [
+    ...b.sessions.map((x) => ({ ...x, result: r2((+x.cashOut || 0) - (+x.buyIn || 0)), manual: true })),
+    ...(b.hideClub ? [] : club.map((x) => ({ ...x, id: x.key, type: "club", game: "NLH", start: x.date + "T23:59" }))),
+  ].sort((x, y) => (x.start || x.date).localeCompare(y.start || y.date));
+  const shown = all.filter((x) => filter === "all" || (filter === "club" ? x.type === "club" : filter === x.type));
+  const dayOf = (x) => (x.start || x.date || "").slice(0, 10);
+  const now = today();
+  const cut = range === "month" ? now.slice(0, 8) + "01" : range === "30d" ? new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10) : range === "ytd" ? now.slice(0, 4) + "-01-01" : "";
+  const inRange = shown.filter((x) => !cut || dayOf(x) >= cut);
+  const adjTotal = r2(b.adjustments.reduce((a, x) => a + (+x.amount || 0), 0));
+  const results = r2(all.reduce((a, x) => a + x.result, 0));
+  const bankroll = r2((+b.start || 0) + adjTotal + results);
+  const monthRes = r2(all.filter((x) => dayOf(x) >= now.slice(0, 8) + "01").reduce((a, x) => a + x.result, 0));
+  const hrs = inRange.filter((x) => x.durationMin).reduce((a, x) => a + x.durationMin / 60, 0);
+  const rangeRes = r2(inRange.reduce((a, x) => a + x.result, 0));
+  const wins = inRange.filter((x) => x.result > 0).length;
+  // Curve: bankroll or cumulative profit over time.
+  let run = mode === "bankroll" ? (+b.start || 0) : 0;
+  const events = [...all.map((x) => ({ d: dayOf(x), v: x.result })), ...(mode === "bankroll" ? b.adjustments.map((x) => ({ d: x.date, v: +x.amount || 0 })) : [])].sort((x, y) => x.d.localeCompare(y.d));
+  const pts = events.map((e) => { run = r2(run + e.v); return { label: e.d.slice(5).replace("-", "/"), v: run, d: e.d }; }).filter((p) => !cut || p.d >= cut);
+  const byKey = (f) => { const m = {}; inRange.forEach((x) => { const k = f(x) || "—"; m[k] = m[k] || { k, n: 0, res: 0, hrs: 0 }; m[k].n++; m[k].res = r2(m[k].res + x.result); m[k].hrs += (x.durationMin || 0) / 60; }); return Object.values(m).sort((a, c) => c.res - a.res); };
+  const months = (() => { const m = {}; inRange.forEach((x) => { const k = dayOf(x).slice(0, 7); m[k] = r2((m[k] || 0) + x.result); }); return Object.entries(m).sort().map(([k, v]) => ({ label: new Date(k + "-15").toLocaleString("en-US", { month: "short", year: "2-digit" }), values: { v } })); })();
+
+  const blank = { type: "cash", game: "NLH", stakes: "", venue: "", start: new Date(Date.now() - new Date().getTimezoneOffset() * 6e4).toISOString().slice(0, 16), durationMin: 120, buyIn: "", cashOut: "", notes: "" };
+  const commit = async () => {
+    const x = { ...form, id: form.id || uid(), buyIn: +form.buyIn || 0, cashOut: +form.cashOut || 0, durationMin: +form.durationMin || 0 };
+    await save({ ...b, sessions: [...b.sessions.filter((s2) => s2.id !== x.id), x] }); setForm(null);
+  };
+  const fld = (label, ctl) => <label style={{ display: "grid", gap: 4, fontSize: 12, color: C.mute }}>{label}{ctl}</label>;
+  const chip = (on, label, onClick) => <button key={label} onClick={onClick} style={{ border: `1px solid ${on ? C.gold : C.line}`, background: on ? C.gold : "transparent", color: on ? "var(--onGold)" : C.ink, borderRadius: 16, padding: "5px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>{label}</button>;
+  const venues = [...new Set(all.map((x) => x.venue).filter(Boolean))];
+  const stakesList = [...new Set(b.sessions.map((x) => x.stakes).filter(Boolean))];
+
+  return (
+    <div style={{ padding: "18px clamp(10px, 2vw, 26px) 60px", maxWidth: 1400, margin: "0 auto", display: "grid", gap: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 2fr) minmax(280px, 1fr)", gap: 14, alignItems: "start" }}>
+        <div style={{ background: C.card, borderRadius: 12, padding: "16px 18px", boxShadow: "0 1px 6px rgba(0,0,0,0.15)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {chip(mode === "bankroll", "Bankroll", () => setMode("bankroll"))}{chip(mode === "profit", "Profit", () => setMode("profit"))}
+            <span style={{ marginLeft: "auto", fontSize: 13, color: monthRes >= 0 ? C.green : C.red, fontWeight: 700 }}>{monthRes >= 0 ? "↗ +" : "↘ "}{fmt(monthRes)} this month</span>
+          </div>
+          <div style={{ fontFamily: "Georgia, serif", fontSize: 40, margin: "8px 0 2px" }}>{fmt(mode === "bankroll" ? bankroll : results)}</div>
+          <div style={{ fontSize: 12, color: C.mute, marginBottom: 8 }}>{fmt(+b.start || 0)} start · {adjTotal >= 0 ? "+" : ""}{fmt(adjTotal)} adjustments · {results >= 0 ? "+" : ""}{fmt(results)} results</div>
+          {pts.length > 1 ? <LineChart points={pts} height={200} label={mode === "bankroll" ? "bankroll" : "profit"} /> : <div style={{ color: C.mute, fontSize: 13, padding: 20 }}>Log a session to start the chart.</div>}
+        </div>
+        <div style={{ display: "grid", gap: 10 }}>
+          <Btn tone="gold" onClick={() => setForm({ ...blank })}>+ Log session</Btn>
+          <Card title="Bankroll settings">
+            <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, marginBottom: 8 }}><span style={{ color: C.mute }}>Starting bankroll</span><span style={{ marginLeft: "auto" }}><NumInput value={b.start} onChange={(v) => save({ ...b, start: v || 0 })} width={100} /></span></div>
+            <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, color: C.mute }}><input type="checkbox" checked={!b.hideClub} onChange={(e) => save({ ...b, hideClub: !e.target.checked })} /> Include weekly club personal play ({club.length} weeks)</label>
+            <div style={{ fontWeight: 700, fontSize: 12.5, margin: "10px 0 4px" }}>Deposits / withdrawals</div>
+            {b.adjustments.map((a) => <div key={a.id} style={{ display: "flex", gap: 8, fontSize: 12.5, padding: "3px 0" }}><span style={{ color: C.mute }}>{a.date}</span><span>{a.note}</span><span style={{ marginLeft: "auto" }}>{money(+a.amount || 0)}</span><button onClick={() => save({ ...b, adjustments: b.adjustments.filter((x) => x.id !== a.id) })} style={{ border: "none", background: "none", color: C.red, cursor: "pointer" }}>×</button></div>)}
+            <Btn tone="ghost" small onClick={() => { const v = window.prompt("Amount (negative for a withdrawal):"); if (v && !isNaN(+v)) save({ ...b, adjustments: [...b.adjustments, { id: uid(), date: today(), amount: +v, note: window.prompt("Note (optional):") || "" }] }); }}>+ Adjustment</Btn>
+          </Card>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        {[["month", "Month"], ["30d", "30d"], ["ytd", "YTD"], ["all", "All"]].map(([k, l]) => chip(range === k, l, () => setRange(k)))}
+        <span style={{ width: 12 }} />
+        {[["all", "All"], ["cash", "Cash"], ["tournament", "Tournaments"], ["club", "Club weeks"]].map(([k, l]) => chip(filter === k, l, () => setFilter(k)))}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
+        {[["Profit", money(rangeRes)], ["Sessions", inRange.length], ["Win %", inRange.length ? Math.round((wins / inRange.length) * 100) + "%" : "—"], ["Hours", hrs ? hrs.toFixed(0) : "—"], ["$ / hour", hrs ? money(r2(inRange.filter((x) => x.durationMin).reduce((a, x) => a + x.result, 0) / hrs)) : "—"], ["Avg session", inRange.length ? money(r2(rangeRes / inRange.length)) : "—"]].map(([l, v]) => (
+          <div key={l} style={{ background: C.card, borderRadius: 10, padding: "12px 14px", boxShadow: "0 1px 6px rgba(0,0,0,0.15)" }}>
+            <div style={{ fontSize: 11.5, color: C.mute, textTransform: "uppercase", letterSpacing: ".06em" }}>{l}</div>
+            <div style={{ fontFamily: "Georgia, serif", fontSize: 24, marginTop: 4 }}>{v}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 14 }}>
+        <Card title="By month">{months.length ? <BarChart groups={months} series={[{ key: "v", label: "Result", color: "var(--gold)" }]} colorBySign height={180} /> : <div style={{ color: C.mute, fontSize: 13 }}>No results in this range.</div>}</Card>
+        {[["By venue", (x) => x.venue], ["By stakes", (x) => (x.type === "club" ? "club week" : x.stakes ? `${x.game} ${x.stakes}` : x.game)]].map(([title, f]) => (
+          <Card key={title} title={title}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr><th style={{ ...th, textAlign: "left" }}></th><th style={th}>Sessions</th><th style={th}>Profit</th><th style={th}>$ / hr</th></tr></thead>
+              <tbody>{byKey(f).slice(0, 8).map((r) => <tr key={r.k} style={{ borderTop: `1px solid ${C.line}` }}><td style={tdL}>{r.k}</td><td style={td}>{r.n}</td><td style={td}>{money(r.res)}</td><td style={td}>{r.hrs ? fmt(r.res / r.hrs, 0) : "—"}</td></tr>)}</tbody>
+            </table>
+          </Card>
+        ))}
+      </div>
+
+      <Card title={`Sessions · ${inRange.length}`}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr><th style={{ ...th, textAlign: "left" }}>Date</th><th style={{ ...th, textAlign: "left" }}>Type</th><th style={{ ...th, textAlign: "left" }}>Game · stakes</th><th style={{ ...th, textAlign: "left" }}>Venue</th><th style={th}>Hours</th><th style={th}>Buy-in</th><th style={th}>Cash out</th><th style={th}>Result</th><th style={{ ...th, textAlign: "left" }}>Notes</th><th style={th}></th></tr></thead>
+          <tbody>{[...inRange].reverse().map((x, i) => (
+            <tr key={x.id} style={{ borderTop: `1px solid ${C.line}`, background: i % 2 ? C.rowAlt : "transparent" }}>
+              <td style={tdL}>{dayOf(x)}</td>
+              <td style={tdL}>{x.type === "club" ? <Pill tone="blue">club week</Pill> : x.type === "tournament" ? <Pill>tournament</Pill> : <Pill tone="green">cash</Pill>}</td>
+              <td style={tdL}>{x.game}{x.stakes ? ` ${x.stakes}` : ""}</td>
+              <td style={tdL}>{x.venue}</td>
+              <td style={td}>{x.durationMin ? (x.durationMin / 60).toFixed(1) : "—"}</td>
+              <td style={td}>{x.manual ? fmt(+x.buyIn || 0) : "—"}</td>
+              <td style={td}>{x.manual ? fmt(+x.cashOut || 0) : "—"}</td>
+              <td style={{ ...td, fontWeight: 700 }}>{money(x.result)}</td>
+              <td style={{ ...tdL, color: C.mute, fontSize: 12 }}>{x.notes || x.note || ""}</td>
+              <td style={td}>{x.manual && <><button onClick={() => setForm({ ...x })} style={{ border: "none", background: "none", color: C.goldDark, cursor: "pointer" }}>✎</button><button onClick={() => window.confirm("Delete this session?") && save({ ...b, sessions: b.sessions.filter((s2) => s2.id !== x.id) })} style={{ border: "none", background: "none", color: C.red, cursor: "pointer" }}>×</button></>}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </Card>
+      <Notes><div>Bankroll = starting bankroll + deposits/withdrawals + every result. Club weeks are your own-account results from each club (current week plus every archived week with saved numbers) and your My Clubs accounts; they update on their own. $/hour only counts sessions with a duration.</div></Notes>
+
+      {form && (
+        <div onClick={() => setForm(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", display: "grid", placeItems: "center", zIndex: 50 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: C.card, color: C.ink, borderRadius: 14, padding: 22, width: "min(460px, 92vw)", display: "grid", gap: 12, boxShadow: "0 12px 40px rgba(0,0,0,.4)" }}>
+            <div style={{ display: "flex", alignItems: "center" }}><div style={{ fontFamily: "Georgia, serif", fontSize: 20 }}>{form.id ? "Edit session" : "Log session"}</div><button onClick={() => setForm(null)} style={{ marginLeft: "auto", border: "none", background: "none", color: C.mute, fontSize: 20, cursor: "pointer" }}>×</button></div>
+            <div style={{ display: "flex", gap: 6 }}>{chip(form.type === "cash", "Cash", () => setForm({ ...form, type: "cash" }))}{chip(form.type === "tournament", "Tournament", () => setForm({ ...form, type: "tournament" }))}</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{BR_GAMES.map((g) => chip(form.game === g, g, () => setForm({ ...form, game: g })))}</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              {fld(form.type === "cash" ? "Stakes" : "Event / buy-in level", <input list="br-stakes" value={form.stakes} onChange={(e) => setForm({ ...form, stakes: e.target.value })} placeholder={form.type === "cash" ? "10/20" : "Sunday Major"} style={inputS} />)}
+              {fld("Venue", <input list="br-venues" value={form.venue} onChange={(e) => setForm({ ...form, venue: e.target.value })} placeholder="Rivers Casino" style={inputS} />)}
+              {fld("Start", <input type="datetime-local" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} style={inputS} />)}
+              {fld("Duration (hours)", <input type="number" step="0.25" value={form.durationMin ? form.durationMin / 60 : ""} onChange={(e) => setForm({ ...form, durationMin: Math.round((+e.target.value || 0) * 60) })} style={inputS} />)}
+              {fld(form.type === "cash" ? "Buy-in (total)" : "Buy-in + rebuys", <input type="number" value={form.buyIn} onChange={(e) => setForm({ ...form, buyIn: e.target.value })} style={inputS} />)}
+              {fld(form.type === "cash" ? "Cash out" : "Prize", <input type="number" value={form.cashOut} onChange={(e) => setForm({ ...form, cashOut: e.target.value })} style={inputS} />)}
+            </div>
+            {fld("Notes", <input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} style={inputS} />)}
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontSize: 13, color: C.mute }}>Result {money(r2((+form.cashOut || 0) - (+form.buyIn || 0)))}</span>
+              <span style={{ marginLeft: "auto" }}><Btn tone="gold" onClick={commit}>{form.id ? "Save" : "Log session"}</Btn></span>
+            </div>
+            <datalist id="br-venues">{venues.map((v) => <option key={v} value={v} />)}</datalist>
+            <datalist id="br-stakes">{stakesList.map((v) => <option key={v} value={v} />)}</datalist>
+          </div>
+        </div>
       )}
     </div>
   );
