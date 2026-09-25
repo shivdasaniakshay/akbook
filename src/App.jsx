@@ -911,6 +911,7 @@ function Notes({ children, title = "How this works" }) {
 const FIT_CSS = `.app table{width:100%;table-layout:auto}
 .app th{white-space:normal!important;padding:6px 5px!important;font-size:clamp(8.5px,0.62vw,10.5px)!important;letter-spacing:.04em!important}
 .app td{padding:5px 5px!important;font-size:clamp(10px,0.78vw,13.5px)!important}
+.app td{white-space:normal!important;overflow-wrap:anywhere}
 .app td select{max-width:100%;font-size:clamp(10px,0.74vw,12px)!important;padding:3px 4px!important}
 .app td input{font-size:clamp(10px,0.74vw,12.5px)!important;padding:3px 4px!important;max-width:clamp(44px,5.5vw,90px)}
 .fit{overflow:hidden!important}`;
@@ -3908,6 +3909,20 @@ async function loadTabs() {
     d.entries = d.entries.map((e) => (e.pnl ? { ...e, pnl: undefined, category: undefined } : e));
     d.miscMigrated = true; changed = true;
   }
+  // One name = one tab: fold a person's separate player/club tabs together.
+  if (!d.nameMerged) {
+    const keep = {}, remap = {};
+    d.counterparties.forEach((c) => { const k = c.name.trim().toLowerCase(); if (!keep[k]) keep[k] = c; else remap[c.id] = keep[k].id; });
+    if (Object.keys(remap).length) {
+      const m = (id) => remap[id] || id;
+      const kept = new Set(Object.values(remap));
+      d.entries = d.entries.map((e) => ({ ...e, cpId: m(e.cpId) }));
+      d.staking = { ...d.staking, deals: d.staking.deals.map((x) => ({ ...x, cpId: m(x.cpId) })) };
+      d.settleChecklist = d.settleChecklist.map((x) => ({ ...x, cpId: m(x.cpId) }));
+      d.counterparties = d.counterparties.filter((c) => !remap[c.id]).map((c) => (kept.has(c.id) ? { ...c, kind: "player" } : c));
+    }
+    d.nameMerged = true; changed = true;
+  }
   if (changed) { try { await store.set(TABS_KEY, JSON.stringify(d)); } catch (e) {} }
   return d;
 }
@@ -3915,12 +3930,12 @@ async function saveTabs(data) { try { await store.set(TABS_KEY, JSON.stringify(d
 
 function applyWeekToTabsData(data, sourceKey, weekLabel, items) {
   if (data.pushed[sourceKey]) return data;
-  const byKey = {}; data.counterparties.forEach((cp) => (byKey[cp.kind + "|" + cp.name.toLowerCase()] = cp));
+  const byKey = {}; data.counterparties.forEach((cp) => (byKey[cp.name.toLowerCase()] = cp));
   const d = today();
   const checklist = data.settleChecklist || (data.settleChecklist = []);
   const onList = new Set(checklist.map((x) => x.cpId));
   items.filter((it) => Math.abs(it.amount) > 0.005).forEach((it) => {
-    const key = it.kind + "|" + it.name.toLowerCase();
+    const key = it.name.toLowerCase();
     let cp = byKey[key];
     if (!cp) { cp = { id: uid(), name: it.name, kind: it.kind }; byKey[key] = cp; data.counterparties.push(cp); }
     data.entries.push({ id: uid(), date: d, cpId: cp.id, amount: r2(it.amount), note: `${it.note} · ${weekLabel}`, source: "week", week: weekLabel, sourceKey });
@@ -3964,7 +3979,7 @@ function applyStakingImport(data, sourceKey, items) {
 function applyUnifiedStakingResults(data, sourceKey, feeds) {
   const feedKey = (dealId, game) => dealId + "|" + game;
   const already = new Set(data.staking.results.filter((r) => r.sourceKey === sourceKey).map((r) => feedKey(r.dealId, r.game)));
-  const byKey = {}; data.counterparties.forEach((cp) => (byKey[cp.kind + "|" + cp.name.toLowerCase()] = cp));
+  const byKey = {}; data.counterparties.forEach((cp) => (byKey[cp.name.toLowerCase()] = cp));
   (feeds || []).forEach((f) => {
     if (!data.staking.deals.some((dl) => dl.id === f.dealId)) return;
     if (!already.has(feedKey(f.dealId, f.game))) data.staking.results.push({ id: uid(), dealId: f.dealId, date: f.date, game: f.game, pnl: f.pnl, holder: f.holder, note: f.note, sourceKey });
@@ -3980,7 +3995,7 @@ function applyUnifiedStakingResults(data, sourceKey, feeds) {
     // person's OTHER non-staked line for the same week/source (e.g. AA's
     // separate "(personal · ...)" row) is left alone.
     if (f.cp && f.noteMatch) {
-      const cp = byKey[f.cp.kind + "|" + f.cp.name.toLowerCase()];
+      const cp = byKey[f.cp.name.toLowerCase()];
       if (cp) data.entries = data.entries.filter((e) => !(e.sourceKey === sourceKey && e.cpId === cp.id && (e.note || "").startsWith(f.noteMatch)));
     }
   });
@@ -4319,7 +4334,7 @@ function unifiedDealWeekly(d) {
   return { name: d.name, kind: "makeup", chop, accrued, sites, thisWeek };
 }
 
-const TABS_VIEWS = [["balances", "Balances"], ["bookkeeping", "Bookkeeping"], ["ledger", "Ledger"], ["vig", "Vig"], ["staking", "Staking"], ["misc", "Misc. P&L"], ["players", "Player data"]];
+const TABS_VIEWS = [["balances", "Balances"], ["bookkeeping", "Weekly imports"], ["ledger", "Ledger"], ["staking", "Staking"], ["vig", "Vig"], ["misc", "Misc. P&L"], ["players", "People"]];
 const sortDateDesc = (list, indexOf) => [...list].sort((a, b) => (b.date || "").localeCompare(a.date || "") || indexOf(b) - indexOf(a));
 const dateInput = (v, onChange, w = 118) => <input type="date" value={v || ""} onChange={(e) => onChange(e.target.value)} style={{ ...inputS, width: w, fontSize: 12.5 }} />;
 const iconBtn = (label, onClick, color, title) => <button onClick={onClick} title={title} style={{ border: "none", background: "none", color, cursor: "pointer", fontSize: 13, padding: "0 4px" }}>{label}</button>;
@@ -4767,6 +4782,8 @@ function TabsLedger({ clubs }) {
   const [expandedCp, setExpandedCp] = useState(null);
   const [confirmDeleteCp, setConfirmDeleteCp] = useState(null);
   const [showPosted, setShowPosted] = useState(false);
+  const [tabSearch, setTabSearch] = useState("");
+  const [tabSort, setTabSort] = useState("amount");
 
   // Pulls the current computed numbers off Fish Tank/AA/My Clubs (via
   // collectPendingWeeks). Only runs on mount by default — call it again with
@@ -4806,8 +4823,8 @@ function TabsLedger({ clubs }) {
 
   // ——— counterparties ———
   const findOrCreateCp = (list, name, kind) => {
-    const key = kind + "|" + name.trim().toLowerCase();
-    let cp = list.find((c) => c.kind + "|" + c.name.toLowerCase() === key);
+    const key = name.trim().toLowerCase();
+    let cp = list.find((c) => c.name.toLowerCase() === key);
     if (cp) return [list, cp];
     cp = { id: uid(), name: name.trim(), kind };
     return [[...list, cp], cp];
@@ -4823,7 +4840,7 @@ function TabsLedger({ clubs }) {
   const renameCp = async (cp) => {
     const name = window.prompt(`Rename "${cp.name}" to:`, cp.name);
     if (!name || !name.trim() || name.trim() === cp.name) return;
-    const dup = cps.find((c) => c.id !== cp.id && c.kind === cp.kind && c.name.toLowerCase() === name.trim().toLowerCase());
+    const dup = cps.find((c) => c.id !== cp.id && c.name.toLowerCase() === name.trim().toLowerCase());
     let next = { ...data, counterparties: [...data.counterparties], entries: [...data.entries] };
     if (dup) {
       if (!window.confirm(`"${dup.name}" already exists. Merge ${cp.name}'s entries into ${dup.name}?`)) return;
@@ -4850,7 +4867,7 @@ function TabsLedger({ clubs }) {
   const aggRows = (s) => {
     const agg = {};
     s.items.filter((it) => Math.abs(it.amount) > 0.005).forEach((it) => {
-      const k = it.kind + "|" + it.name.toLowerCase();
+      const k = it.name.toLowerCase();
       if (!agg[k]) agg[k] = { key: k, name: it.name, kind: it.kind, amount: 0, n: 0, notes: [], checklist: false };
       agg[k].amount += it.amount; agg[k].n += 1; if (it.note) agg[k].notes.push(it.note); if (it.checklist) agg[k].checklist = true;
     });
@@ -5093,9 +5110,9 @@ function TabsLedger({ clubs }) {
   const mergePerson = async (per) => {
     const kind = per.kind || "player";
     const names = new Set([per.name.toLowerCase(), ...per.aliases.map((a) => a.name.trim().toLowerCase())]);
-    const matches = cps.filter((c) => names.has(c.name.toLowerCase()) && !(c.kind === kind && c.name.toLowerCase() === per.name.toLowerCase()));
+    const matches = cps.filter((c) => names.has(c.name.toLowerCase()) && c.name.toLowerCase() !== per.name.toLowerCase());
     if (!matches.length) { flash(`No separate tab entries found under ${per.name}'s aliases.`); return; }
-    if (!window.confirm(`Merge ${matches.map((m) => `${m.name} (${m.kind})`).join(", ")} into "${per.name}" (${kind})? Their ledger entries and staking deals move under the one name.`)) return;
+    if (!window.confirm(`Merge ${matches.map((m) => m.name).join(", ")} into "${per.name}"? Their ledger entries and staking deals move under the one name.`)) return;
     let next = { ...data, counterparties: [...data.counterparties], entries: [...data.entries] };
     const [cpsNext, target] = findOrCreateCp(next.counterparties, per.name, kind);
     next.counterparties = cpsNext;
@@ -5118,10 +5135,10 @@ function TabsLedger({ clubs }) {
   };
 
   // ——— counterparty notes / delete (Balances dropdown) ———
-  const findPersonForCp = (cp) => persons.find((per) => (per.kind || "player") === cp.kind && (per.name.toLowerCase() === cp.name.toLowerCase() || per.aliases.some((a) => a.name.toLowerCase() === cp.name.toLowerCase())));
+  const findPersonForCp = (cp) => persons.find((per) => (per.name.toLowerCase() === cp.name.toLowerCase() || per.aliases.some((a) => a.name.toLowerCase() === cp.name.toLowerCase())));
   const setCpNotes = (id, notes) => save({ ...data, counterparties: data.counterparties.map((c) => (c.id === id ? { ...c, notes } : c)) });
   const bundleIntoPlayerData = async (cp) => {
-    if (persons.some((per) => (per.kind || "player") === cp.kind && per.name.toLowerCase() === cp.name.toLowerCase())) { flash(`${cp.name} is already in Player Data.`); return; }
+    if (persons.some((per) => per.name.toLowerCase() === cp.name.toLowerCase())) { flash(`${cp.name} is already in People.`); return; }
     await setPersons([...persons, { id: uid(), name: cp.name, kind: cp.kind, aliases: [], notes: cp.notes || "" }]);
     flash(`Added ${cp.name} to Player Data.`);
   };
@@ -5157,18 +5174,68 @@ function TabsLedger({ clubs }) {
     setConfirmDeleteCp(null);
   };
 
-  if (!loaded) return <div style={{ padding: 40, color: C.mute }}>Loading…</div>;
 
   const exportAll = () => setExportData({ title: "Tabs ledger", text: toTSV(["Date", "Counterparty", "Kind", "Amount", "Method", "Vig", "Note", "Source"],
     sortDateDesc(allEntries, (e) => allEntries.indexOf(e)).map((e) => [e.date, cpById(e.cpId)?.name || "?", cpById(e.cpId)?.kind || "", e.amount.toFixed(2), e.method || "", e.vig != null ? e.vig.toFixed(2) : "", e.note || "", e.source === "week" ? e.week : e.source])) });
 
-  const kindSection = (kind, title, extraRows) => {
-    const list = cps.filter((c) => c.kind === kind).filter((c) => showZero || Math.abs(balances[c.id] || 0) > 0.005 || staking.makeupByCp[c.id]);
-    const subtotal = list.reduce((a, c) => a + (balances[c.id] || 0), 0);
-    return (
-      <Card title={`${title} · ${fmt(subtotal)}`}>
-        {list.length === 0 && !extraRows && <div style={{ color: C.mute, fontSize: 13 }}>Nothing open.</div>}
-        {list.map((c) => {
+  // ——— People: duplicate suggestions, club settle-with names ———
+  const normName = (n) => n.toLowerCase().replace(/[^a-z0-9]/g, "").replace(/\d+$/, "");
+  const dupPairs = useMemo(() => {
+    const out = [], dismissed = new Set(data.dupDismissed || []);
+    const samePerson = (a, b) => { const pa = findPersonForCp(a), pb = findPersonForCp(b); return pa && pb && pa.id === pb.id; };
+    for (let i = 0; i < cps.length; i++) for (let j = i + 1; j < cps.length; j++) {
+      const a = cps[i], b = cps[j], na = normName(a.name), nb = normName(b.name);
+      if (na.length < 3 || nb.length < 3) continue;
+      const close = na === nb || ((na.startsWith(nb) || nb.startsWith(na)) && Math.min(na.length, nb.length) >= 4 && Math.abs(na.length - nb.length) <= 4);
+      if (close && !dismissed.has(a.id + "|" + b.id) && !samePerson(a, b)) out.push([a, b]);
+    }
+    return out;
+  }, [cps, data.dupDismissed, persons]);
+  // Merge one tab into another and remember the old name as a username of that person.
+  const mergeTabInto = async (from, into) => {
+    let next = { ...data, counterparties: [...data.counterparties], entries: [...data.entries] };
+    next = mergeCps(next, [from.id], into.id);
+    let ps = [...persons];
+    let per = ps.find((x) => x.name.toLowerCase() === into.name.toLowerCase()) || findPersonForCp(into);
+    if (!per) { per = { id: uid(), name: into.name, kind: "player", aliases: [], notes: into.notes || "" }; ps.push(per); }
+    const fromPer = ps.find((x) => x.id !== per.id && x.name.toLowerCase() === from.name.toLowerCase());
+    const extra = [{ name: from.name, site: "" }, ...(fromPer ? fromPer.aliases : [])].filter((a) => !per.aliases.some((x) => x.name.toLowerCase() === a.name.toLowerCase()) && a.name.toLowerCase() !== per.name.toLowerCase());
+    ps = ps.filter((x) => !fromPer || x.id !== fromPer.id).map((x) => (x.id === per.id ? { ...x, aliases: [...x.aliases, ...extra] } : x));
+    next.persons = normPersons(ps);
+    await save(next);
+    flash(`Merged ${from.name} into ${into.name}.`);
+  };
+  const dismissDup = (a, b) => save({ ...data, dupDismissed: [...(data.dupDismissed || []), a.id + "|" + b.id] });
+  const [mcClubs, setMcClubs] = useState([]);
+  useEffect(() => { (async () => { try { const c = await store.get("agentclubs-v3"); if (c?.value) setMcClubs(JSON.parse(c.value).clubs || []); } catch (e) {} })(); }, []);
+  const setClubOwner = async (clubId, owner) => {
+    const c = await store.get("agentclubs-v3"); if (!c?.value) return;
+    const a = JSON.parse(c.value);
+    a.clubs = (a.clubs || []).map((x) => (x.id === clubId ? { ...x, owner } : x));
+    await store.set("agentclubs-v3", JSON.stringify(a)); setMcClubs(a.clubs);
+    // Existing tab under the club's own name moves onto the owner's tab.
+    const club = a.clubs.find((x) => x.id === clubId);
+    const old = cps.find((x) => x.name.toLowerCase() === (club?.name || "").toLowerCase());
+    if (owner.trim() && old && old.name.toLowerCase() !== owner.trim().toLowerCase() && window.confirm(`Move the "${old.name}" club tab onto ${owner.trim()}'s tab?`)) {
+      let next = { ...data, counterparties: [...data.counterparties], entries: [...data.entries] };
+      const [list, target] = findOrCreateCp(next.counterparties, owner.trim(), "player");
+      next.counterparties = list;
+      await save(mergeCps(next, [old.id], target.id));
+    }
+    flash(`${club?.name} now settles with ${owner.trim() || "the club itself"}.`);
+  };
+  const [peopleSearch, setPeopleSearch] = useState("");
+  // Old weeks logged under a club's own name before its owner was set.
+  const strayClubTabs = mcClubs.filter((c) => (c.owner || "").trim() && c.owner.trim().toLowerCase() !== c.name.toLowerCase()).map((c) => [c, cps.find((x) => x.name.toLowerCase() === c.name.toLowerCase())]).filter(([, cp]) => cp);
+  const moveStrayClubTabs = async () => {
+    if (!window.confirm(`Move ${strayClubTabs.length} club tab(s) onto their owners' tabs? (${strayClubTabs.map(([c]) => `${c.name} → ${c.owner}`).join(", ")})`)) return;
+    let next = { ...data, counterparties: [...data.counterparties], entries: [...data.entries] };
+    strayClubTabs.forEach(([c, cp]) => { const [list, target] = findOrCreateCp(next.counterparties, c.owner.trim(), "player"); next.counterparties = list; next = mergeCps(next, [cp.id], target.id); });
+    await save(next);
+    flash(`Moved ${strayClubTabs.length} club tabs onto their owners.`);
+  };
+
+  const tabRow = (c) => {
           const open = expandedCp === c.id;
           const per = findPersonForCp(c);
           return (
@@ -5177,6 +5244,8 @@ function TabsLedger({ clubs }) {
                 <span style={{ color: C.mute, fontSize: 10, width: 10, display: "inline-block", flexShrink: 0 }}>{open ? "▾" : "▸"}</span>
                 <span style={{ color: C.ink, fontWeight: 600, fontSize: 13.5 }}>{c.name}</span>
                 {iconBtn("✎", (e) => { e.stopPropagation(); renameCp(c); }, C.mute, "Rename (renaming onto an existing name merges)")}
+                {c.kind === "club" && <Pill tone="blue">club</Pill>}
+                {per && per.aliases.length > 0 && <span style={{ fontSize: 11, color: C.mute, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 260 }}>{per.aliases.map((a) => a.name).join(", ")}</span>}
                 {staking.makeupByCp[c.id] > 0.005 && <Pill tone="red">in makeup {fmt(staking.makeupByCp[c.id])}</Pill>}
                 <span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums" }}>{money(balances[c.id] || 0)}</span>
                 <button onClick={(e) => { e.stopPropagation(); settleUp(c); }} title="Log settling entry" style={{ border: `1px solid ${C.line}`, background: C.surface, color: C.mute, borderRadius: 5, cursor: "pointer", fontSize: 10.5, padding: "2px 8px" }}>settle</button>
@@ -5219,20 +5288,6 @@ function TabsLedger({ clubs }) {
               )}
             </div>
           );
-        })}
-        {extraRows && extraRows.length > 0 && (
-          <div style={{ marginTop: list.length ? 10 : 0 }}>
-            <div style={{ fontSize: 10.5, letterSpacing: "0.08em", textTransform: "uppercase", color: C.goldDark, fontWeight: 700, marginBottom: 2 }}>Running totals · read-only · not in net position</div>
-            {extraRows.map(([label, v]) => (
-              <div key={label} style={{ display: "flex", padding: "5px 0", borderTop: `1px solid ${C.line}`, fontSize: 13 }}>
-                <span style={{ color: C.mute }}>{label}</span>
-                <span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums" }}>{money(v)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </Card>
-    );
   };
 
   const methodInput = (value, onChange, w = 110) => (
@@ -5255,6 +5310,7 @@ function TabsLedger({ clubs }) {
     return sortDateDesc(list, (e) => data.misc.indexOf(e));
   })();
 
+  if (!loaded) return <div style={{ padding: 40, color: C.mute }}>Loading…</div>;
   return (
     <div>
       <ExportModal data={exportData} onClose={() => setExportData(null)} />
@@ -5273,11 +5329,9 @@ function TabsLedger({ clubs }) {
           <Btn tone="ghost" small onClick={exportAll}>Copy</Btn>
         </div>
       </div>
-      <div style={{ padding: "20px 26px 60px", maxWidth: 1180, margin: "0 auto" }}>
+      <div style={{ padding: "18px clamp(10px, 2vw, 26px) 60px", maxWidth: 1400, margin: "0 auto" }}>
         {note && <div style={{ background: C.banner, color: C.goldDark, padding: "8px 14px", borderRadius: 6, marginBottom: 14, fontSize: 12.5 }}>{note}</div>}
-        <div style={{ color: C.mute, fontSize: 12.5, marginBottom: 14 }}>
-          <b style={{ color: C.green }}>Positive = they owe you</b> · <b style={{ color: C.red }}>negative = you owe them</b>. Weekly settlements from Fish Tank/All American/My Clubs and the settle checklist live in Bookkeeping. Everything else is logged in Ledger.
-        </div>
+        <div style={{ color: C.mute, fontSize: 12, marginBottom: 12 }}><b style={{ color: C.green }}>+ they owe you</b> · <b style={{ color: C.red }}>− you owe them</b></div>
 
         {/* ═══════════ BOOKKEEPING ═══════════ */}
         {view === "bookkeeping" && (
@@ -5397,18 +5451,38 @@ function TabsLedger({ clubs }) {
         )}
 
         {/* ═══════════ BALANCES ═══════════ */}
-        {view === "balances" && (
-          <>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14, marginBottom: 12 }}>
-              {kindSection("player", "Player tabs")}
-              {kindSection("club", "Club tabs")}
-              {kindSection("other", "Other", otherTotals)}
+        {view === "balances" && (() => {
+          const q = tabSearch.trim().toLowerCase();
+          const rows = cps.filter((c) => (showZero || Math.abs(balances[c.id] || 0) > 0.005 || staking.makeupByCp[c.id]) && (!q || c.name.toLowerCase().includes(q) || (findPersonForCp(c)?.aliases || []).some((a) => a.name.toLowerCase().includes(q))))
+            .sort((x, y) => (tabSort === "name" ? x.name.localeCompare(y.name) : Math.abs(balances[y.id] || 0) - Math.abs(balances[x.id] || 0)));
+          const owed = r2(cps.reduce((acc, c) => acc + Math.max(0, balances[c.id] || 0), 0));
+          const owe = r2(cps.reduce((acc, c) => acc + Math.min(0, balances[c.id] || 0), 0));
+          return (
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 2fr) minmax(260px, 1fr)", gap: 14, alignItems: "start" }}>
+              <Card title={`Tabs · ${rows.length}`} right={
+                <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input placeholder="Search name or username…" value={tabSearch} onChange={(e) => setTabSearch(e.target.value)} style={{ ...inputS, width: 190, fontSize: 12 }} />
+                  <select value={tabSort} onChange={(e) => setTabSort(e.target.value)} style={{ ...inputS, fontSize: 12 }}><option value="amount">Biggest first</option><option value="name">A–Z</option></select>
+                </span>}>
+                {rows.length === 0 && <div style={{ color: C.mute, fontSize: 13 }}>Nothing open.</div>}
+                {rows.map((c) => tabRow(c))}
+                <label style={{ fontSize: 12, color: C.mute, display: "flex", gap: 6, alignItems: "center", marginTop: 10 }}>
+                  <input type="checkbox" checked={showZero} onChange={(e) => setShowZero(e.target.checked)} /> show settled (zero) tabs
+                </label>
+              </Card>
+              <Card title="Totals">
+                {[["They owe you", owed], ["You owe", owe]].map(([l, v]) => <div key={l} style={{ display: "flex", padding: "6px 0", fontSize: 13.5 }}><span style={{ color: C.mute }}>{l}</span><span style={{ marginLeft: "auto" }}>{money(v)}</span></div>)}
+                <div style={{ display: "flex", padding: "8px 0", fontSize: 14, borderTop: `1px solid ${C.line}`, fontWeight: 700 }}><span>Net position</span><span style={{ marginLeft: "auto" }}>{money(totalAll)}</span></div>
+                <div style={{ fontSize: 10.5, letterSpacing: "0.08em", textTransform: "uppercase", color: C.goldDark, fontWeight: 700, margin: "12px 0 2px" }}>Running totals · not in net position</div>
+                {otherTotals.map(([label, v]) => (
+                  <div key={label} style={{ display: "flex", padding: "5px 0", borderTop: `1px solid ${C.line}`, fontSize: 12.5 }}>
+                    <span style={{ color: C.mute }}>{label}</span><span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums" }}>{money(v)}</span>
+                  </div>
+                ))}
+              </Card>
             </div>
-            <label style={{ fontSize: 12.5, color: C.mute, display: "flex", gap: 6, alignItems: "center" }}>
-              <input type="checkbox" checked={showZero} onChange={(e) => setShowZero(e.target.checked)} /> show zero balances
-            </label>
-          </>
-        )}
+          );
+        })()}
 
         {/* ═══════════ LEDGER ═══════════ */}
         {view === "ledger" && (
@@ -5430,7 +5504,7 @@ function TabsLedger({ clubs }) {
                         <option value="player">Player</option><option value="club">Club</option><option value="other">Other</option>
                       </select>
                       <input list="tabs-cp-names" placeholder="Who…" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} style={{ ...inputS, width: 170 }} />
-                      <datalist id="tabs-cp-names">{cps.filter((c) => c.kind === f.kind).map((c) => <option key={c.id} value={c.name} />)}</datalist>
+                      <datalist id="tabs-cp-names">{cps.map((c) => <option key={c.id} value={c.name} />)}</datalist>
                       <NumInput width={100} value={f.amount} onChange={(v) => setF({ ...f, amount: v })} />
                       {methodInput(f.method, (m) => setF({ ...f, method: m }))}
                       {isCrypto(f.method) && <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: C.mute }}>vig <PctInput width={52} value={fRate} onChange={(v) => setF({ ...f, rate: v })} />
@@ -5449,14 +5523,14 @@ function TabsLedger({ clubs }) {
                         <option value="player">Player</option><option value="club">Club</option><option value="other">Other</option>
                       </select>
                       <input list="tabs-swap-from-names" placeholder="Who's sending…" value={sw.from} onChange={(e) => setSw({ ...sw, from: e.target.value })} style={{ ...inputS, width: 150 }} />
-                      <datalist id="tabs-swap-from-names">{cps.filter((c) => c.kind === sw.fromKind).map((c) => <option key={c.id} value={c.name} />)}</datalist>
+                      <datalist id="tabs-swap-from-names">{cps.map((c) => <option key={c.id} value={c.name} />)}</datalist>
                       <span style={{ color: C.mute }}>→</span>
                       <span style={{ fontSize: 11, color: C.mute, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>To</span>
                       <select value={sw.toKind} onChange={(e) => setSw({ ...sw, toKind: e.target.value })} style={{ ...inputS, fontSize: 12.5 }}>
                         <option value="player">Player</option><option value="club">Club</option><option value="other">Other</option>
                       </select>
                       <input list="tabs-swap-to-names" placeholder="Who's receiving…" value={sw.to} onChange={(e) => setSw({ ...sw, to: e.target.value })} style={{ ...inputS, width: 150 }} />
-                      <datalist id="tabs-swap-to-names">{cps.filter((c) => c.kind === sw.toKind).map((c) => <option key={c.id} value={c.name} />)}</datalist>
+                      <datalist id="tabs-swap-to-names">{cps.map((c) => <option key={c.id} value={c.name} />)}</datalist>
                       <NumInput width={100} value={sw.amount} onChange={(v) => setSw({ ...sw, amount: v })} />
                       {methodInput(sw.method, (m) => setSw({ ...sw, method: m }))}
                       <input placeholder="Note" value={sw.note} onChange={(e) => setSw({ ...sw, note: e.target.value })} style={{ ...inputS, flex: 1, minWidth: 160 }} />
@@ -5484,7 +5558,7 @@ function TabsLedger({ clubs }) {
                 <span style={{ marginLeft: "auto", fontSize: 11.5, color: C.mute }}>newest first · click ✎ to edit any line</span>
               </div>
               <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", minWidth: 980, borderCollapse: "collapse" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead><tr style={{ background: C.cream }}>
                     <th style={{ ...th, textAlign: "left" }}>Date</th><th style={{ ...th, textAlign: "left" }}>Who</th>
                     <th style={th}>Amount</th><th style={{ ...th, textAlign: "left" }}>Method</th><th style={th}>Vig</th><th style={{ ...th, textAlign: "left" }}>Note</th>
@@ -5514,11 +5588,11 @@ function TabsLedger({ clubs }) {
                       return (
                         <tr key={e.id} style={{ background: i % 2 ? C.rowAlt : C.card, borderTop: `1px solid ${C.line}` }}>
                           <td style={{ ...tdL, color: C.mute, fontSize: 12 }}>{e.date}</td>
-                          <td style={{ ...tdL, fontWeight: 600 }}>{cp?.name || "?"} <span style={{ color: C.mute, fontWeight: 400, fontSize: 11 }}>({cp?.kind})</span></td>
+                          <td style={{ ...tdL, fontWeight: 600 }}>{cp?.name || "?"}</td>
                           <td style={td}>{money(e.amount)}{e.baseAmount != null && Math.abs(e.baseAmount - e.amount) > 0.005 && <div style={{ fontSize: 10, color: C.mute }}>sent {fmt(e.baseAmount)}</div>}</td>
                           <td style={{ ...tdL, fontSize: 12 }}>{e.method ? <Pill tone={isCrypto(e.method) ? "gold" : "blue"}>{e.method}</Pill> : <span style={{ color: C.mute }}>—</span>}</td>
                           <td style={{ ...td, fontSize: 12 }}>{e.vig != null ? <span style={{ color: e.vig >= 0 ? C.green : C.red }}>{fmt(e.vig)} <span style={{ color: C.mute }}>@{e.vigRate}%</span></span> : ""}</td>
-                          <td style={{ ...tdL, fontSize: 12.5, whiteSpace: "normal", minWidth: 220 }}>{e.note || ""}</td>
+                          <td style={{ ...tdL, fontSize: 12.5, whiteSpace: "normal" }}>{e.note || ""}</td>
                           <td style={{ ...tdL, color: C.mute, fontSize: 11.5 }}>{e.source === "week" ? e.week : e.source === "staking" ? <span title="Produced by a staking result — edit it in Staking">staking</span> : e.source === "swap" ? <span title="Linked swap — deleting removes both sides">swap · {cpById(e.swapWith)?.name || "?"}</span> : "manual"}</td>
                           <td style={{ ...td, width: 60, whiteSpace: "nowrap" }}>
                             {e.source === "staking" ? iconBtn("→", () => { setView("staking"); }, C.goldDark, "Edit in Staking") : <>{iconBtn("✎", () => startEdit(e), C.goldDark, "Edit")}{iconBtn("×", () => delEntry(e.id), C.red, "Delete")}</>}
@@ -5545,7 +5619,7 @@ function TabsLedger({ clubs }) {
             <div style={{ color: C.mute, fontSize: 12.5, marginBottom: 12 }}>Every ledger entry with method <b>crypto</b> lands here. Positive amount (you → them) = vig gain; negative (them → you) = vig loss. Change a rate here and the tab amount recomputes; edit the base amount, note, or date from the Ledger.</div>
             <div style={{ background: C.card, borderRadius: 10, overflow: "hidden", boxShadow: "0 1px 5px rgba(0,0,0,0.12)" }}>
               <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", minWidth: 820, borderCollapse: "collapse" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead><tr style={{ background: C.cream }}>
                     <th style={{ ...th, textAlign: "left" }}>Date</th><th style={{ ...th, textAlign: "left" }}>Who</th><th style={th}>Amount moved</th><th style={th}>Rate</th><th style={th}>Vig gain / loss</th><th style={th}>Tab effect</th><th style={{ ...th, textAlign: "left" }}>Note</th><th style={th}></th>
                   </tr></thead>
@@ -5660,7 +5734,7 @@ function TabsLedger({ clubs }) {
                       </div>
                       {openDeal[d.deal.id] && (
                         <div style={{ overflowX: "auto", marginTop: 6 }}>
-                          <table style={{ width: "100%", minWidth: 900, borderCollapse: "collapse" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse" }}>
                             <thead><tr style={{ background: C.cream }}>
                               <th style={{ ...th, textAlign: "left" }}>Date</th><th style={{ ...th, textAlign: "left" }}>Game</th><th style={th}>P&L</th><th style={th}>%</th><th style={th}>Net</th><th style={{ ...th, textAlign: "left" }}>Holder</th>
                               {d.deal.type === "makeup" && <><th style={th}>Makeup after</th><th style={th}>Chop (Ak)</th><th style={th}>Chop (player)</th></>}
@@ -5814,7 +5888,7 @@ function TabsLedger({ clubs }) {
                 <select value={miscCatFilter} onChange={(e) => setMiscCatFilter(e.target.value)} style={{ ...inputS, fontSize: 12.5 }}><option value="">all categories</option>{miscCats.map((c) => <option key={c} value={c}>{c}</option>)}</select>
               </div>
               <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", minWidth: 700, borderCollapse: "collapse" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead><tr style={{ background: C.cream }}><th style={{ ...th, textAlign: "left" }}>Date</th><th style={{ ...th, textAlign: "left" }}>Category</th><th style={th}>Amount</th><th style={{ ...th, textAlign: "left" }}>Note</th><th style={th}></th></tr></thead>
                   <tbody>
                     {miscRows.length === 0 && <tr><td colSpan={5} style={{ ...tdL, color: C.mute, padding: 16 }}>Nothing logged.</td></tr>}
@@ -5844,88 +5918,77 @@ function TabsLedger({ clubs }) {
 
         {/* ═══════════ PLAYER DATA ═══════════ */}
         {view === "players" && (
-          <>
-            <Card title="Player data — one person, many usernames" right={
+          <div style={{ display: "grid", gap: 14 }}>
+            {dupPairs.length > 0 && (
+              <Card title={`Possible duplicates · ${dupPairs.length}`}>
+                {dupPairs.slice(0, 30).map(([x, y]) => (
+                  <div key={x.id + y.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "6px 0", borderTop: `1px solid ${C.line}`, fontSize: 13, flexWrap: "wrap" }}>
+                    <b>{x.name}</b> <span style={{ color: C.mute }}>{fmt(balances[x.id] || 0)}</span>
+                    <span style={{ color: C.mute }}>and</span>
+                    <b>{y.name}</b> <span style={{ color: C.mute }}>{fmt(balances[y.id] || 0)}</span>
+                    <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                      <Btn tone="ghost" small onClick={() => mergeTabInto(y, x)}>Merge into {x.name}</Btn>
+                      <Btn tone="ghost" small onClick={() => mergeTabInto(x, y)}>Merge into {y.name}</Btn>
+                      <button onClick={() => dismissDup(x, y)} style={{ border: "none", background: "none", color: C.mute, cursor: "pointer", fontSize: 12 }}>not the same</button>
+                    </span>
+                  </div>
+                ))}
+              </Card>
+            )}
+
+            <Card title="People" right={
               <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <input placeholder="New person (e.g. Melon)…" value={newPerson} onChange={(e) => setNewPerson(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addPerson()} style={{ ...inputS, width: 190 }} />
+                <input placeholder="Search…" value={peopleSearch} onChange={(e) => setPeopleSearch(e.target.value)} style={{ ...inputS, width: 150, fontSize: 12 }} />
+                <input placeholder="New person…" value={newPerson} onChange={(e) => setNewPerson(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addPerson()} style={{ ...inputS, width: 150, fontSize: 12 }} />
                 <Btn tone="gold" small onClick={addPerson}>+ Person</Btn>
               </span>}>
-              <div style={{ fontSize: 12.5, color: C.mute, marginBottom: 8 }}>
-                One person, many usernames across sites — scaled up from the same idea as DL umbrellas in Fish Tank/All American, but site-wide. Type a new username and where it plays (Fish Tank, {(clubs || []).map((c) => c.name).join(", ")}, My Clubs, or any) for a name that hasn't shown up on an export yet, or use <b>pick from known usernames</b> to chip-select from everyone already seen on the last imported week per site. When a week is accepted, settlements for every alias land on the person's single tab. <b>Tab shows as</b> lets someone who both plays under a username and owns/settles a club (e.g. a My Clubs club owner) fold their player tab and club tab into one — set it to Club, add their player alias(es), and both sides land on the same balance going forward. Notes are for accounting — payment methods, Discord vs Telegram, whatever helps. <b>Merge existing</b> pulls tab entries (of any kind — player, club, or other) already sitting under the alias names into the person's name.
-              </div>
-              {persons.length === 0 && <div style={{ color: C.mute, fontSize: 13 }}>No people yet. Create "Melon", then add fewtire (Fish Tank), adbank (All American), P7713 (My Clubs).</div>}
-              {persons.map((per) => (
-                <div key={per.id} style={{ borderTop: `1px solid ${C.line}`, padding: "10px 0" }}>
-                  <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
-                    <div style={{ minWidth: 220 }}>
-                      <input value={per.name} onChange={(e) => patchPerson(per.id, { name: e.target.value })} style={{ ...inputS, width: 200, fontWeight: 700, fontSize: 13.5 }} />
-                      <div style={{ marginTop: 6, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                        <span style={{ fontSize: 11, color: C.mute }}>Tab shows as</span>
-                        <select value={per.kind || "player"} onChange={(e) => patchPerson(per.id, { kind: e.target.value })} style={{ ...inputS, padding: "2px 6px", fontSize: 11.5 }}>
-                          <option value="player">Player</option><option value="club">Club</option><option value="other">Other</option>
-                        </select>
-                      </div>
-                      <div style={{ marginTop: 6, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                        <Btn tone="ghost" small onClick={() => mergePerson(per)}>Merge existing tab entries</Btn>
-                        {(() => { const cp = cps.find((c) => c.kind === (per.kind || "player") && c.name.toLowerCase() === per.name.toLowerCase()); return cp ? <span style={{ fontSize: 12, color: C.mute }}>tab {money(balances[cp.id] || 0)}</span> : <span style={{ fontSize: 12, color: C.mute }}>no tab yet</span>; })()}
-                      </div>
+              {persons.length === 0 && <div style={{ color: C.mute, fontSize: 13 }}>No people yet.</div>}
+              {persons.filter((per) => { const q = peopleSearch.trim().toLowerCase(); return !q || per.name.toLowerCase().includes(q) || per.aliases.some((x) => x.name.toLowerCase().includes(q)); })
+                .sort((x, y) => x.name.localeCompare(y.name)).map((per) => {
+                const cp = cps.find((c) => c.name.toLowerCase() === per.name.toLowerCase());
+                const strays = cps.filter((c) => c.id !== cp?.id && per.aliases.some((x) => x.name.toLowerCase() === c.name.toLowerCase()));
+                const draft = addAlias[per.id]?.name || "";
+                const addUser = () => { const v = draft.trim(); if (v && !per.aliases.some((x) => x.name.toLowerCase() === v.toLowerCase())) patchPerson(per.id, { aliases: [...per.aliases, { name: v, site: addAlias[per.id]?.site || "" }] }); setAddAlias({ ...addAlias, [per.id]: { name: "", site: "" } }); };
+                return (
+                  <div key={per.id} style={{ display: "grid", gridTemplateColumns: "minmax(140px, 180px) 1fr minmax(160px, 220px) 90px 24px", gap: 10, alignItems: "center", padding: "8px 0", borderTop: `1px solid ${C.line}` }}>
+                    <input value={per.name} onChange={(e) => patchPerson(per.id, { name: e.target.value })} style={{ ...inputS, fontWeight: 700, width: "100%", boxSizing: "border-box" }} />
+                    <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
+                      {per.aliases.map((x, i) => (
+                        <span key={x.name + i} title={x.site ? `only on ${x.site}` : "any site"} style={{ background: C.surface, border: `1px solid ${C.line}`, borderRadius: 12, padding: "1px 4px 1px 9px", fontSize: 11.5, display: "inline-flex", gap: 4, alignItems: "center" }}>
+                          {x.name}{x.site && <span style={{ color: C.mute, fontSize: 10 }}>· {x.site}</span>}
+                          <button onClick={() => patchPerson(per.id, { aliases: per.aliases.filter((_, j) => j !== i) })} style={{ border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 12, padding: 0 }}>×</button>
+                        </span>
+                      ))}
+                      <input list="people-names" placeholder="+ username" value={draft} onChange={(e) => setAddAlias({ ...addAlias, [per.id]: { ...(addAlias[per.id] || {}), name: e.target.value } })} onKeyDown={(e) => e.key === "Enter" && addUser()} onBlur={addUser} style={{ ...inputS, width: 110, fontSize: 11.5, padding: "2px 6px" }} />
+                      {strays.length > 0 && <Btn tone="ghost" small onClick={() => mergePerson(per)}>merge {strays.length} tab{strays.length > 1 ? "s" : ""}</Btn>}
                     </div>
-                    <div style={{ flex: 1, minWidth: 260 }}>
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                        {per.aliases.map((a, i) => (
-                          <span key={a.name + i} style={{ background: C.surface, border: `1px solid ${C.gold}`, borderRadius: 12, padding: "2px 4px 2px 9px", fontSize: 11.5, display: "inline-flex", gap: 4, alignItems: "center" }}>
-                            <b>{a.name}</b>
-                            <select value={a.site || ""} onChange={(e) => patchPerson(per.id, { aliases: per.aliases.map((x, j) => (j === i ? { ...x, site: e.target.value } : x)) })} style={{ ...inputS, padding: "1px 4px", fontSize: 10.5, border: "none", background: "transparent", color: C.mute }}>
-                              {SITES.map((s) => <option key={s} value={s}>{s || "any site"}</option>)}
-                            </select>
-                            <button onClick={() => patchPerson(per.id, { aliases: per.aliases.filter((_, j) => j !== i) })} style={{ border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 11 }}>×</button>
-                          </span>
-                        ))}
-                        <input list={"alias-names-" + per.id} placeholder="add username…" value={addAlias[per.id]?.name || ""} onChange={(e) => setAddAlias({ ...addAlias, [per.id]: { ...(addAlias[per.id] || {}), name: e.target.value } })}
-                          onKeyDown={(e) => { if (e.key === "Enter") { const v = (addAlias[per.id]?.name || "").trim(); if (v && !per.aliases.some((x) => x.name.toLowerCase() === v.toLowerCase())) patchPerson(per.id, { aliases: [...per.aliases, { name: v, site: addAlias[per.id]?.site || "" }] }); setAddAlias({ ...addAlias, [per.id]: { ...(addAlias[per.id] || {}), name: "" } }); } }}
-                          style={{ ...inputS, width: 140, fontSize: 11.5 }} />
-                        <select value={addAlias[per.id]?.site || ""} onChange={(e) => setAddAlias({ ...addAlias, [per.id]: { ...(addAlias[per.id] || {}), site: e.target.value } })} style={{ ...inputS, fontSize: 11.5, padding: "3px 6px" }}>
-                          {SITES.map((s) => <option key={s} value={s}>{s || "any site"}</option>)}
-                        </select>
-                        <datalist id={"alias-names-" + per.id}>{allSeenNames.map((n) => <option key={n} value={n} />)}</datalist>
-                        {usernameGroups.length > 0 && (
-                          <button onClick={() => setPickerOpen({ ...pickerOpen, [per.id]: !pickerOpen[per.id] })} style={{ border: `1px solid ${C.line}`, background: C.surface, color: C.goldDark, borderRadius: 12, cursor: "pointer", fontSize: 11, padding: "2px 10px" }}>
-                            {pickerOpen[per.id] ? "hide known usernames ▴" : "pick from known usernames ▾"}
-                          </button>
-                        )}
-                      </div>
-                      {pickerOpen[per.id] && (
-                        <div style={{ marginTop: 8, padding: "8px 10px", background: C.surface, borderRadius: 6 }}>
-                          <div style={{ fontSize: 10.5, color: C.mute, marginBottom: 6 }}>Every username seen on the last imported week across every site. Click to add as an alias for {per.name || "this person"}; dimmed names already belong to someone else.</div>
-                          {usernameGroups.map(([site, list]) => (
-                            <div key={site} style={{ marginBottom: 8 }}>
-                              <div style={{ fontSize: 10.5, color: C.mute, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>{site}</div>
-                              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                                {list.map((u) => {
-                                  const inThis = personHasUsername(per, u.name, u.site);
-                                  const inOther = !inThis && persons.some((p2) => p2.id !== per.id && personHasUsername(p2, u.name, u.site));
-                                  return (
-                                    <button key={u.site + "|" + u.name} onClick={() => !inOther && toggleUsername(per, u.name, u.site)} style={{
-                                      padding: "3px 10px", borderRadius: 12, fontSize: 11.5, fontWeight: 600, cursor: inOther ? "default" : "pointer",
-                                      border: `1px solid ${inThis ? C.goldDark : C.line}`,
-                                      background: inThis ? C.gold : C.card, color: inThis ? "var(--onGold)" : inOther ? "var(--chipOff)" : C.mute, opacity: inOther ? 0.6 : 1 }}>
-                                      {u.name}{u.hint && <span style={{ opacity: 0.75, fontWeight: 400 }}> · {u.hint}</span>}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      <textarea value={per.notes || ""} onChange={(e) => patchPerson(per.id, { notes: e.target.value })} placeholder="Notes — payment methods, Telegram / Discord, deal reminders…" rows={2} style={{ ...inputS, width: "100%", boxSizing: "border-box", marginTop: 6, fontFamily: "inherit", resize: "vertical" }} />
-                    </div>
-                    <button onClick={() => { if (window.confirm(`Delete person "${per.name}"? Tab entries stay under whatever name they have now.`)) setPersons(persons.filter((x) => x.id !== per.id)); }} style={{ border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 13 }}>× delete</button>
+                    <input value={per.notes || ""} onChange={(e) => patchPerson(per.id, { notes: e.target.value })} placeholder="Notes (payment, Telegram…)" style={{ ...inputS, fontSize: 12, width: "100%", boxSizing: "border-box" }} />
+                    <span style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{cp ? money(balances[cp.id] || 0) : <span style={{ color: C.mute, fontSize: 12 }}>no tab</span>}</span>
+                    <button onClick={() => { if (window.confirm(`Remove "${per.name}" from People? Their tab stays.`)) setPersons(persons.filter((x) => x.id !== per.id)); }} style={{ border: "none", background: "none", color: C.red, cursor: "pointer", fontSize: 15 }}>×</button>
                   </div>
-                </div>
-              ))}
+                );
+              })}
+              <datalist id="people-names">{allSeenNames.map((n) => <option key={n} value={n} />)}</datalist>
             </Card>
-          </>
+
+            {mcClubs.length > 0 && (
+              <Card title="My Clubs — who you settle with" right={strayClubTabs.length > 0 ? <Btn tone="gold" small onClick={moveStrayClubTabs}>Move {strayClubTabs.length} old club tabs onto owners</Btn> : null}>
+                {mcClubs.map((c) => (
+                  <div key={c.id} style={{ display: "flex", gap: 10, alignItems: "center", padding: "5px 0", borderTop: `1px solid ${C.line}`, fontSize: 13 }}>
+                    <b style={{ minWidth: 160 }}>{c.name}</b>
+                    <span style={{ color: C.mute, fontSize: 12 }}>settles with</span>
+                    <input list="people-names" defaultValue={c.owner || ""} placeholder="the club itself" onBlur={(e) => e.target.value.trim() !== (c.owner || "") && setClubOwner(c.id, e.target.value.trim())} onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()} style={{ ...inputS, width: 200, fontSize: 12 }} />
+                    {c.owner && <span style={{ color: C.mute, fontSize: 12 }}>→ lands on {c.owner}'s tab</span>}
+                  </div>
+                ))}
+              </Card>
+            )}
+            <Notes>
+              <div>Each person has one tab. Usernames listed under a person (from any club) all settle onto that one tab. A username can be limited to one site if the same name means different people on different sites.</div>
+              <div><b>Possible duplicates</b> are tabs with near-identical names (e.g. Rlawns / Rlawnsgud). Merging moves all entries and staking deals onto one tab and keeps the old name as a username.</div>
+              <div><b>Settles with</b>: when you settle a club with its owner directly, name them here — that club's weekly amount goes on the owner's tab. Several clubs can share one owner.</div>
+            </Notes>
+          </div>
         )}
       </div>
     </div>
